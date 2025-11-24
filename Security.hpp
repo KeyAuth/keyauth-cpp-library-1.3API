@@ -5,6 +5,25 @@
 #include <aclapi.h>
 #include <bcrypt.h>
 
+
+auto is_hooked = [](void* fn) -> bool {
+    if (!fn) return true;
+
+
+    BYTE bytes[5];
+    memcpy(bytes, fn, 5);
+
+
+    if (bytes[0] == 0xE9 || bytes[0] == 0xE8)
+        return true;
+
+    if (bytes[0] == 0xFF && bytes[1] == 0x25)
+        return true;
+
+    return false;
+    };
+
+
 // code submitted in pull request from https://github.com/sbtoonz, authored by KeePassXC https://github.com/keepassxreboot/keepassxc/blob/dab7047113c4ad4ffead944d5c4ebfb648c1d0b0/src/core/Bootstrap.cpp#L121
 inline bool LockMemAccess()
 {

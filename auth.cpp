@@ -1694,6 +1694,27 @@ std::string KeyAuth::api::req(const std::string& data, const std::string& url) {
     signature.clear();
     signatureTimestamp.clear();
 
+
+    if (is_hooked((void*)&curl_easy_perform))
+    {
+        error("Hook detected in curl_easy_perform");
+    }
+
+    if (is_hooked((void*)&curl_easy_init))
+    {
+        error("Hook detected in curl_easy_init");
+    }
+
+    if (is_hooked((void*)&curl_easy_setopt))
+    {
+        error("Hook detected in curl_easy_setopt");
+    }
+
+    if (is_hooked((void*)&curl_easy_cleanup))
+    {
+        error("Hook detected in curl_easy_cleanup");
+    }
+
     CURL* curl = curl_easy_init();
     if (!curl) {
         error(XorStr("CURL Initialization Failed!"));
