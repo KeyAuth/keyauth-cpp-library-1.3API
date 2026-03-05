@@ -2326,7 +2326,7 @@ bool hosts_override_present(const std::string& host)
 			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
 		// word check example, this can always be improved
-		if (line.find(" " + host_lower) != std:string::npos || line.find("\t" + host_lower) != std::string::npos)
+		if (line.find(" " + host_lower) != std::string::npos || line.find("\t" + host_lower) != std::string::npos)
 			return true;
 	}
 	return false;
@@ -3103,7 +3103,7 @@ static void security_watchdog()
     while (true) {
         Sleep(15000);
         if (!checkinit_ok()) {
-            error(XorStr("security watchdog detected tamper."))
+            error(XorStr("security watchdog detected tamper."));
         }
         checkInit();
     }
