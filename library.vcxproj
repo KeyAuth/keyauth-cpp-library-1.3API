@@ -146,7 +146,7 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard>stdcpp20</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <DebugInformationFormat>None</DebugInformationFormat>
       <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -167,6 +167,18 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="auth.cpp" />
+    <ClCompile Include="protection\antiDLL\antiDLL.cpp" />
+    <ClCompile Include="protection\hooking\detours\detours.cpp" />
+    <ClCompile Include="protection\hooking\detours\disasm.cpp" />
+    <ClCompile Include="protection\hooking\detours\disolarm.cpp" />
+    <ClCompile Include="protection\hooking\detours\disolarm64.cpp" />
+    <ClCompile Include="protection\hooking\detours\disolia64.cpp" />
+    <ClCompile Include="protection\hooking\detours\disolx64.cpp" />
+    <ClCompile Include="protection\hooking\detours\disolx86.cpp" />
+    <ClCompile Include="protection\hooking\detours\image.cpp" />
+    <ClCompile Include="protection\hooking\detours\modules.cpp" />
+    <ClCompile Include="protection\hooking\hooking\hooking.cpp" />
+    <ClCompile Include="protection\protection.cpp" />
     <ClCompile Include="QRCode\pingout.cpp" />
     <ClCompile Include="QRCode\qr.png.cpp" />
     <ClCompile Include="QRCode\qrcode.cpp" />
@@ -294,10 +306,21 @@
     <ClInclude Include="nlohmann\ordered_map.hpp" />
     <ClInclude Include="nlohmann\thirdparty\hedley\hedley.hpp" />
     <ClInclude Include="nlohmann\thirdparty\hedley\hedley_undef.hpp" />
+    <ClInclude Include="protection\antiDLL\antiDLL.h" />
+    <ClInclude Include="protection\hooking\detours\detours.h" />
+    <ClInclude Include="protection\hooking\detours\detver.h" />
+    <ClInclude Include="protection\hooking\hooking\hooking.h" />
+    <ClInclude Include="protection\protection.h" />
     <ClInclude Include="QRCode\pngout.hpp" />
     <ClInclude Include="QRCode\qr.png.h" />
     <ClInclude Include="QRCode\qrcode.hpp" />
     <ClInclude Include="Security.hpp" />
+    <ClInclude Include="Syscaller\crt.hpp" />
+    <ClInclude Include="Syscaller\hash.hpp" />
+    <ClInclude Include="Syscaller\native_api.hpp" />
+    <ClInclude Include="Syscaller\platform.hpp" />
+    <ClInclude Include="Syscaller\shared.hpp" />
+    <ClInclude Include="Syscaller\syscall.hpp" />
     <ClInclude Include="utils.hpp" />
     <ClInclude Include="xorstr.hpp" />
   </ItemGroup>

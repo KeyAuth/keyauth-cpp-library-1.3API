@@ -10,7 +10,7 @@
  * message sizes.
  *
  * In addition, nonces are short and repeated nonces would totally destroy
- * the security of this scheme.
+ * the Security of this scheme.
  *
  * Nonces should thus come from atomic counters, which can be difficult to
  * set up in a distributed environment.

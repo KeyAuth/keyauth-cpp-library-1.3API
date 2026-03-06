@@ -59,7 +59,9 @@
 #include <QRCode/qr.png.h>
 
 #define SHA256_HASH_SIZE 32
+#include "protection/protection.h"
 
+DWORD64 Function_Address;
 static std::string hexDecode(const std::string& hex);
 std::string get_str_between_two_str(const std::string& s, const std::string& start_delim, const std::string& stop_delim);
 int VerifyPayload(std::string signature, std::string timestamp, std::string body);
@@ -188,7 +190,7 @@ void KeyAuth::api::init()
             if (json[(XorStr("success"))])
             {
                 if (json[(XorStr("newSession"))]) {
-                    Sleep(100);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
                 sessionid = json[(XorStr("sessionid"))];
                 initialized = true;
@@ -1366,7 +1368,7 @@ std::string KeyAuth::api::var(std::string varid) {
 }
 
 void KeyAuth::api::log(std::string message) {
-    checkInit();
+    checkInit(); // why call when ppl can nop it, program will fail if its 0
 
     char acUserName[100];
     DWORD nUserName = sizeof(acUserName);
@@ -1659,7 +1661,6 @@ int VerifyPayload(std::string signature, std::string timestamp, std::string body
     return value & 0xFFFF;
 }
 
-
 // credits https://stackoverflow.com/a/3790661
 static std::string hexDecode(const std::string& hex)
 {
@@ -1673,6 +1674,7 @@ static std::string hexDecode(const std::string& hex)
     }
     return newString;
 }
+
 // credits https://stackoverflow.com/a/43002794
 std::string get_str_between_two_str(const std::string& s,
     const std::string& start_delim,
@@ -1731,6 +1733,7 @@ void error(std::string message) {
     system((XorStr("start cmd /C \"color b && title Error && echo ").c_str() + message + XorStr(" && timeout /t 5\"")).c_str());
     LI_FN(__fastfail)(0);
 }
+
 // code submitted in pull request from https://github.com/Roblox932
 auto check_section_integrity( const char *section_name, bool fix = false ) -> bool
 {
@@ -1855,20 +1858,21 @@ void checkAtoms() {
             LI_FN(exit)(13);
             LI_FN(__fastfail)(0);
         }
-        Sleep(1000); // thread interval
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     }
 }
 
 void checkFiles() {
+    // who did this lol, calling exit and fastfail
+    // use fastfail if Security issue and exit if safe
 
     while (true) {
         std::string file_path = XorStr("C:\\ProgramData\\").c_str() + seed;
         DWORD file_attr = LI_FN(GetFileAttributesA)(file_path.c_str());
         if (file_attr == INVALID_FILE_ATTRIBUTES || (file_attr & FILE_ATTRIBUTE_DIRECTORY)) {
             LI_FN(exit)(14);
-            LI_FN(__fastfail)(0);
         }
-        Sleep(2000); // thread interval, files are more intensive than Atom tables which use memory
+        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
     }
 }
 
@@ -1880,10 +1884,9 @@ void checkRegistry() {
         LONG result = LI_FN(RegOpenKeyExA)(HKEY_CURRENT_USER, regPath.c_str(), 0, KEY_READ, &hKey);
         if (result != ERROR_SUCCESS) {
             LI_FN(exit)(15);
-            LI_FN(__fastfail)(0);
         }
         LI_FN(RegCloseKey)(hKey);
-	Sleep(1500); // thread interval
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
     }
 }
 
@@ -2060,6 +2063,7 @@ void checkInit() {
         error(XorStr("You need to run the KeyAuthApp.init(); function before any other KeyAuth functions"));
     }
 }
+
 // code submitted in pull request from https://github.com/BINM7MD
 BOOL bDataCompare(const BYTE* pData, const BYTE* bMask, const char* szMask)
 {
@@ -2086,11 +2090,16 @@ DWORD64 FindPattern(BYTE* bMask, const char* szMask)
     return NULL;
 }
 
-DWORD64 Function_Address;
 void modify()
 {
+
+    // 3% CPU usage its okay
+   
     // code submitted in pull request from https://github.com/Roblox932
     check_section_integrity( XorStr( ".text" ).c_str( ), true );
+
+    // submitted by https://github.com/officialchristheg
+    CProtection::InitializeProtection();
 
     while (true)
     {
@@ -2116,7 +2125,7 @@ void modify()
         if ((DWORD64)Instruction == 0xE9) {
             error(XorStr("Pattern checksum failed, don't tamper with the program."));
         }
-        Sleep(50);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 }
 
