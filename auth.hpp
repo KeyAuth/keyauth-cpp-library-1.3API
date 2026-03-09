@@ -141,11 +141,31 @@ namespace KeyAuth {
 		void set_pinned_public_keys(const std::vector<std::string>& pins) { pinned_public_keys = pins; }
 		void add_pinned_public_key(const std::string& pin) { pinned_public_keys.push_back(pin); }
 		void clear_pinned_public_keys() { pinned_public_keys.clear(); }
+
+		// Optional in-memory string protection. When enabled, public fields like
+		// name/ownerid/version/url/path are wiped and only decrypted on demand.
+		void enable_secure_strings(bool enable = true);
 	private:
 
 		std::string sessionid, enckey;
 		std::vector<std::string> allowed_hosts;
 		std::vector<std::string> pinned_public_keys;
+		bool secure_strings_enabled_ = false;
+		uint32_t secure_strings_key_ = 0;
+		std::string name_enc_;
+		std::string ownerid_enc_;
+		std::string version_enc_;
+		std::string url_enc_;
+		std::string path_enc_;
+
+		std::string get_name() const;
+		std::string get_ownerid() const;
+		std::string get_version() const;
+		std::string get_url() const;
+		std::string get_path() const;
+		std::string xor_crypt_field(const std::string& in) const;
+		uint32_t derive_secure_key() const;
+
 		std::string req(std::string data, const std::string& url);
 		static void debugInfo(std::string data, std::string url, std::string response, std::string headers);
 		static void setDebug(bool value);
