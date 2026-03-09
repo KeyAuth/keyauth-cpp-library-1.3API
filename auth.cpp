@@ -598,6 +598,12 @@ void KeyAuth::api::init()
             {
                 std::string dl = json[(XorStr("download"))];
                 api::app_data.downloadLink = dl;
+                if (dl.empty()) {
+                    api::response.message = XorStr("Version in the loader does not match the one on the dashboard, and the download link on dashboard is blank. To fix this, either fix the loader so it matches the version on the dashboard. Or if you intended for it to have different versions, update the download link on dashboard so it will auto-update correctly.");
+                }
+                else {
+                    api::response.message = XorStr("invalidver");
+                }
                 if (autoOpenDownloadUrl) {
                     if (!dl.empty()) {
                         ShellExecuteA(0, XorStr("open").c_str(), dl.c_str(), 0, 0, SW_SHOWNORMAL);
