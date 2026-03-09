@@ -540,7 +540,7 @@ void KeyAuth::api::init()
         thash = exec(("certutil -hashfile \"" + path + XorStr("\" MD5 | find /i /v \"md5\" | find /i /v \"certutil\"")).c_str());
 
         data += XorStr("&token=").c_str() + token;
-        data += XorStr("&thash=").c_str() + path;
+        data += XorStr("&thash=").c_str() + thash;
     }
     // curl was only used for escape above
 
