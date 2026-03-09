@@ -59,6 +59,7 @@ namespace KeyAuth {
 		bool block_proxy = false;
 		bool block_custom_ca = false;
 		bool block_private_dns = false;
+		bool autoOpenDownloadUrl = false;
 		static std::string expiry_remaining(const std::string& expiry);
 		static constexpr const char* kSavePath = "test.json";
 		static constexpr int kInitFailSleepMs = 1500;
