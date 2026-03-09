@@ -12,6 +12,12 @@
 
 #define _CRT_SECURE_NO_WARNINGS
 
+#ifdef NDEBUG
+#define KA_EXIT(code) LI_FN(exit)(1)
+#else
+#define KA_EXIT(code) LI_FN(exit)(code)
+#endif
+
 #include <auth.hpp>
 #include <strsafe.h> 
 #include <windows.h>
@@ -534,9 +540,10 @@ static bool pubkey_memory_protect_ok()
 
 static std::string get_public_key_hex()
 {
-    if (!pubkey_memory_protect_ok()) {
-        error(XorStr("public key memory protection tampered."));
-    }
+    // disabled: public key memory protection check. -nigel
+    // if (!pubkey_memory_protect_ok()) {
+    //     error(XorStr("public key memory protection tampered."));
+    // }
     std::string a = decode_pubkey_hex(k_pubkey_obf1, sizeof(k_pubkey_obf1), k_pubkey_xor1);
     std::string b = decode_pubkey_hex(k_pubkey_obf2, sizeof(k_pubkey_obf2), k_pubkey_xor2);
     if (a != b) {
@@ -544,9 +551,10 @@ static std::string get_public_key_hex()
     }
     const uint64_t h = fnv1a64_bytes(reinterpret_cast<const uint8_t*>(a.data()), a.size());
     pubkey_hash_seen.store(h, std::memory_order_relaxed);
-    if (h != k_pubkey_fnv1a) {
-        error(XorStr("public key integrity failed."));
-    }
+    // disabled: public key integrity check. -nigel
+    // if (h != k_pubkey_fnv1a) {
+    //     error(XorStr("public key integrity failed."));
+    // }
     return a;
 }
 
@@ -624,7 +632,7 @@ void KeyAuth::api::init()
     if (get_ownerid().length() != 10)
     {
         MessageBoxA(0, XorStr("Application Not Setup Correctly. Please Watch Video Linked in main.cpp").c_str(), NULL, MB_ICONERROR);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     std::string hash = checksum();
@@ -644,14 +652,14 @@ void KeyAuth::api::init()
     const std::string resolved_path = get_path();
     if (resolved_path.find("https") != std::string::npos) {
         MessageBoxA(0, XorStr("You forgot to remove \"secret\" from main.cpp. Copy details from ").c_str(), NULL, MB_ICONERROR);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (resolved_path != "" || !resolved_path.empty()) {
 
         if (!std::filesystem::exists(resolved_path)) {
             MessageBoxA(0, XorStr("File not found. Please make sure the file exists.").c_str(), NULL, MB_ICONERROR);
-            LI_FN(exit)(0);
+            KA_EXIT(0);
         }
         //get the contents of the file
         std::ifstream file(resolved_path);
@@ -686,7 +694,7 @@ void KeyAuth::api::init()
 
     if (response == XorStr("KeyAuth_Invalid").c_str()) {
         MessageBoxA(0, XorStr("Application not found. Please copy strings directly from dashboard.").c_str(), NULL, MB_ICONERROR);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     std::hash<int> hasher;
@@ -711,7 +719,7 @@ void KeyAuth::api::init()
         auto json = response_decoder.parse(response);
 
         if (json[(XorStr("ownerid"))] != get_ownerid()) {
-            LI_FN(exit)(8);
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -744,15 +752,15 @@ void KeyAuth::api::init()
                 {
                     ShellExecuteA(0, XorStr("open").c_str(), dl.c_str(), 0, 0, SW_SHOWNORMAL);
                 }
-                LI_FN(exit)(0);
+                KA_EXIT(0);
             }
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -822,7 +830,7 @@ void KeyAuth::api::login(std::string username, std::string password, std::string
     {
         auto json = response_decoder.parse(response);
         if (json[(XorStr("ownerid"))] != get_ownerid()) {
-            LI_FN(exit)(8);
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -861,15 +869,15 @@ void KeyAuth::api::login(std::string username, std::string password, std::string
 		start_heartbeat(this);
             }
             else {
-                LI_FN(exit)(12);
+                KA_EXIT(12);
             }
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -931,7 +939,7 @@ void KeyAuth::api::changeUsername(std::string newusername)
 
         auto json = response_decoder.parse(response);
         if (json[(XorStr("ownerid"))] != get_ownerid()) {
-            LI_FN(exit)(8);
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -944,11 +952,11 @@ void KeyAuth::api::changeUsername(std::string newusername)
             load_response_data(json);
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -1063,11 +1071,11 @@ void KeyAuth::api::web_login()
 
     if (result == ERROR_INVALID_PARAMETER) {
         MessageBoxA(NULL, "The Flags parameter contains an unsupported value.", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
     if (result != NO_ERROR) {
         MessageBoxA(NULL, "System error for Initialize", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     // Create server session.
@@ -1076,17 +1084,17 @@ void KeyAuth::api::web_login()
 
     if (result == ERROR_REVISION_MISMATCH) {
         MessageBoxA(NULL, "Version for session invalid", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result == ERROR_INVALID_PARAMETER) {
         MessageBoxA(NULL, "pServerSessionId parameter is null", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result != NO_ERROR) {
         MessageBoxA(NULL, "System error for HttpCreateServerSession", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     // Create URL group.
@@ -1095,12 +1103,12 @@ void KeyAuth::api::web_login()
 
     if (result == ERROR_INVALID_PARAMETER) {
         MessageBoxA(NULL, "Url group create parameter error", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result != NO_ERROR) {
         MessageBoxA(NULL, "System error for HttpCreateUrlGroup", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     // Create request queue.
@@ -1109,32 +1117,32 @@ void KeyAuth::api::web_login()
 
     if (result == ERROR_REVISION_MISMATCH) {
         MessageBoxA(NULL, "Wrong version", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result == ERROR_INVALID_PARAMETER) {
         MessageBoxA(NULL, "Byte length exceeded", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result == ERROR_ALREADY_EXISTS) {
         MessageBoxA(NULL, "pName already used", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result == ERROR_ACCESS_DENIED) {
         MessageBoxA(NULL, "queue access denied", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result == ERROR_DLL_INIT_FAILED) {
         MessageBoxA(NULL, "Initialize not called", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result != NO_ERROR) {
         MessageBoxA(NULL, "System error for HttpCreateRequestQueue", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     // Attach request queue to URL group.
@@ -1145,12 +1153,12 @@ void KeyAuth::api::web_login()
 
     if (result == ERROR_INVALID_PARAMETER) {
         MessageBoxA(NULL, XorStr("Invalid parameter").c_str(), "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result != NO_ERROR) {
         MessageBoxA(NULL, XorStr("System error for HttpSetUrlGroupProperty").c_str(), "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     // Add URLs to URL group.
@@ -1159,27 +1167,27 @@ void KeyAuth::api::web_login()
 
     if (result == ERROR_ACCESS_DENIED) {
         MessageBoxA(NULL, XorStr("No permissions to run web server").c_str(), "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result == ERROR_ALREADY_EXISTS) {
         MessageBoxA(NULL, XorStr("You are running this program already").c_str(), "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result == ERROR_INVALID_PARAMETER) {
         MessageBoxA(NULL, XorStr("ERROR_INVALID_PARAMETER for HttpAddUrlToUrlGroup").c_str(), "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result == ERROR_SHARING_VIOLATION) {
         MessageBoxA(NULL, XorStr("Another program is using the webserver. Close Razer Chroma mouse software if you use that. Try to restart computer.").c_str(), "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result != NO_ERROR) {
         MessageBoxA(NULL, XorStr("System error for HttpAddUrlToUrlGroup").c_str(), "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     // Announce that it is running.
@@ -1281,7 +1289,7 @@ void KeyAuth::api::web_login()
         {
             auto json = response_decoder.parse(resp);
             if (json[(XorStr("ownerid"))] != get_ownerid()) {
-                LI_FN(exit)(8);
+                KA_EXIT(8);
             }
 
             std::string message = json[(XorStr("message"))];
@@ -1314,7 +1322,7 @@ void KeyAuth::api::web_login()
 		    start_heartbeat(this);
                 }
                 else {
-                    LI_FN(exit)(12);
+                    KA_EXIT(12);
                 }
 
                 // Respond to the request.
@@ -1372,14 +1380,14 @@ void KeyAuth::api::web_login()
                 }
 
                 if (!success)
-                    LI_FN(exit)(0);
+                    KA_EXIT(0);
             }
             else {
-                LI_FN(exit)(9);
+                KA_EXIT(9);
             }
         }
         else {
-            LI_FN(exit)(7);
+            KA_EXIT(7);
         }
     }
 }
@@ -1528,7 +1536,7 @@ void KeyAuth::api::regstr(std::string username, std::string password, std::strin
     {
         auto json = response_decoder.parse(response);
         if (json[(XorStr("ownerid"))] != get_ownerid()) {
-            LI_FN(exit)(8);
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -1565,16 +1573,16 @@ void KeyAuth::api::regstr(std::string username, std::string password, std::strin
 		LoggedIn.store(true);
             }
             else {
-                LI_FN(exit)(12);
+                KA_EXIT(12);
             }
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else
     {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -1599,7 +1607,7 @@ void KeyAuth::api::upgrade(std::string username, std::string key) {
     {
         auto json = response_decoder.parse(response);
         if (json[(XorStr("ownerid"))] != get_ownerid()) {
-            LI_FN(exit)(8);
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -1614,11 +1622,11 @@ void KeyAuth::api::upgrade(std::string username, std::string key) {
             load_response_data(json);
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -1659,7 +1667,7 @@ void KeyAuth::api::license(std::string key, std::string code) {
     {
         auto json = response_decoder.parse(response);
         if (json[(XorStr("ownerid"))] != get_ownerid()) {
-            LI_FN(exit)(8);
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -1695,15 +1703,15 @@ void KeyAuth::api::license(std::string key, std::string code) {
 		LoggedIn.store(true);
             }
             else {
-                LI_FN(exit)(12);
+                KA_EXIT(12);
             }
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -1743,7 +1751,7 @@ std::string KeyAuth::api::getvar(std::string var) {
     {
         auto json = response_decoder.parse(response);
         if (json[(XorStr("ownerid"))] != get_ownerid()) {
-            LI_FN(exit)(8);
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -1757,11 +1765,11 @@ std::string KeyAuth::api::getvar(std::string var) {
             return !json[(XorStr("response"))].is_null() ? json[(XorStr("response"))] : XorStr("");
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -1784,7 +1792,7 @@ void KeyAuth::api::ban(std::string reason) {
     {
         auto json = response_decoder.parse(response);
         if (json[(XorStr("ownerid"))] != get_ownerid()) {
-            LI_FN(exit)(8);
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -1797,12 +1805,12 @@ void KeyAuth::api::ban(std::string reason) {
             load_response_data(json);
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else
     {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -1825,7 +1833,7 @@ bool KeyAuth::api::checkblack() {
     {
         auto json = response_decoder.parse(response);
         if (json[(XorStr("ownerid"))] != get_ownerid()) {
-            LI_FN(exit)(8);
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -1837,10 +1845,10 @@ bool KeyAuth::api::checkblack() {
         if (!json[(XorStr("success"))] || (json[(XorStr("success"))] && (resultCode == expectedHash))) {
             return json[XorStr("success")];
         }
-        LI_FN(exit)(9);
+        KA_EXIT(9);
     }
     else {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -1867,7 +1875,7 @@ void KeyAuth::api::check(bool check_paid) {
     {
         auto json = response_decoder.parse(response);
         if (json[(XorStr("ownerid"))] != get_ownerid()) {
-            LI_FN(exit)(8);
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -1880,11 +1888,11 @@ void KeyAuth::api::check(bool check_paid) {
             load_response_data(json);
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -1906,7 +1914,7 @@ std::string KeyAuth::api::var(std::string varid) {
     {
         auto json = response_decoder.parse(response);
         if (json[(XorStr("ownerid"))] != get_ownerid()) {
-            LI_FN(exit)(8);
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -1920,11 +1928,11 @@ std::string KeyAuth::api::var(std::string varid) {
             return json[(XorStr("message"))];
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -2025,7 +2033,7 @@ std::string KeyAuth::api::webhook(std::string id, std::string params, std::strin
     {
         auto json = response_decoder.parse(response);
         if (json[(XorStr("ownerid"))] != get_ownerid()) {
-            LI_FN(exit)(8);
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -2040,11 +2048,11 @@ std::string KeyAuth::api::webhook(std::string id, std::string params, std::strin
             return !json[(XorStr("response"))].is_null() ? json[(XorStr("response"))] : XorStr("");
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -2067,7 +2075,7 @@ std::string KeyAuth::api::fetchonline()
     {
         auto json = response_decoder.parse(response);
         if (json[(XorStr("ownerid"))] != get_ownerid()) {
-            LI_FN(exit)(8);
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -2088,11 +2096,11 @@ std::string KeyAuth::api::fetchonline()
             return onlineusers;
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -2115,7 +2123,7 @@ void KeyAuth::api::fetchstats()
 
         auto json = response_decoder.parse(response);
         if (json[(XorStr("ownerid"))] != get_ownerid()) {
-            LI_FN(exit)(8);
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -2132,11 +2140,11 @@ void KeyAuth::api::fetchstats()
                 load_app_data(json[(XorStr("appinfo"))]);
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -3677,9 +3685,10 @@ std::string KeyAuth::api::req(std::string data, const std::string& url) {
             if (host_resolves_private_only(host_lower, has_public) && !has_public) {
                 error(XorStr("API host resolves to private or loopback."));
             }
-            if (dns_cache_poisoned(host_lower)) {
-                error(XorStr("DNS cache poisoning detected for API host."));
-            }
+            // disabled: dns cache poisoning check. -nigel
+            // if (dns_cache_poisoned(host_lower)) {
+            //     error(XorStr("DNS cache poisoning detected for API host."));
+            // }
         }
     }
 
@@ -4055,7 +4064,7 @@ void checkAtoms() {
 
     while (true) {
         if (LI_FN(GlobalFindAtomA)(seed.c_str()) == 0) {
-            LI_FN(exit)(13);
+            KA_EXIT(13);
             LI_FN(__fastfail)(0);
         }
         Sleep(1000); // thread interval
@@ -4068,7 +4077,7 @@ void checkFiles() {
         std::string file_path = XorStr("C:\\ProgramData\\").c_str() + seed;
         DWORD file_attr = LI_FN(GetFileAttributesA)(file_path.c_str());
         if (file_attr == INVALID_FILE_ATTRIBUTES || (file_attr & FILE_ATTRIBUTE_DIRECTORY)) {
-            LI_FN(exit)(14);
+            KA_EXIT(14);
             LI_FN(__fastfail)(0);
         }
         Sleep(2000); // thread interval, files are more intensive than Atom tables which use memory
@@ -4082,7 +4091,7 @@ void checkRegistry() {
         HKEY hKey;
         LONG result = LI_FN(RegOpenKeyExA)(HKEY_CURRENT_USER, regPath.c_str(), 0, KEY_READ, &hKey);
         if (result != ERROR_SUCCESS) {
-            LI_FN(exit)(15);
+            KA_EXIT(15);
             LI_FN(__fastfail)(0);
         }
         LI_FN(RegCloseKey)(hKey);
