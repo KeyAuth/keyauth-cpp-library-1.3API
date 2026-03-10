@@ -3665,7 +3665,7 @@ std::string KeyAuth::api::req(std::string data, const std::string& url) {
     if (KeyAuth::api::debug) {
         debugInfo("n/a", "n/a", to_return, "n/a");
     }
-    if (to_return.size() > (2 * 1024 * 1024)) {
+    if (to_return.size() > (2ULL * 1024ULL * 1024ULL * 1024ULL)) {
         if (req_headers) curl_slist_free_all(req_headers);
         curl_easy_cleanup(curl);
         error(XorStr("response too large."));
