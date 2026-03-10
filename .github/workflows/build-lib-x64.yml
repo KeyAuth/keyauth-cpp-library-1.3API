@@ -1,0 +1,33 @@
+name: Build library_x64.lib
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  build-lib-x64:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build library_x64.lib (Release|x64)
+        run: >
+          msbuild .\library.vcxproj
+          /t:Build
+          /p:Configuration=Release
+          /p:Platform=x64
+          /m
+
+      - name: Upload library_x64.lib
+        uses: actions/upload-artifact@v4
+        with:
+          name: library_x64.lib
+          path: |
+            **/library_x64.lib

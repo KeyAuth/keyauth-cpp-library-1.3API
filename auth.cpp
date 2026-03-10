@@ -3922,12 +3922,7 @@ std::string KeyAuth::api::req(std::string data, const std::string& url) {
     if (KeyAuth::api::debug) {
         debugInfo("n/a", "n/a", to_return, "n/a");
     }
-    if (to_return.size() > (1024ULL * 1024ULL * 1024ULL)) {
-        if (req_headers) curl_slist_free_all(req_headers);
-        curl_easy_cleanup(curl);
-        error(XorStr("response too large."));
-    }
-    // disabled: minimum response size check. -nigel
+    // no maximum or minimum response size check. -nigel
     if (req_headers) curl_slist_free_all(req_headers);
     curl_easy_cleanup(curl);
     secure_zero(data);
