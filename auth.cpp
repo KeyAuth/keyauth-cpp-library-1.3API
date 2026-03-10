@@ -1960,7 +1960,6 @@ std::vector<unsigned char> KeyAuth::api::download(std::string fileid) {
         return std::vector<unsigned char>(value.data(), value.data() + value.length() );
     };
 
-
     auto data =
         XorStr("type=file") +
         XorStr("&fileid=") + fileid +
@@ -1970,14 +1969,22 @@ std::vector<unsigned char> KeyAuth::api::download(std::string fileid) {
 
     for (int attempt = 0; attempt < 2; ++attempt) {
         auto response = req(data, get_url());
-        auto json = response_decoder.parse(response);
-        std::string message = json[(XorStr("message"))];
+        auto json = nlohmann::json::parse(response, nullptr, false);
+        if (json.is_discarded() || !json.is_object()) {
+            api::response.success = false;
+            api::response.message = XorStr("invalid JSON response from download endpoint");
+            api::response.message += " [";
+            api::response.message += k_build_tag;
+            api::response.message += "]";
+            return {};
+        }
 
         load_response_data(json);
-        if (json[XorStr("success")]) {
+        const bool success = json.value(XorStr("success"), false);
+        if (success) {
             std::string contents;
             const std::string key_contents = XorStr("contents");
-            if (json.contains(key_contents) && !json[key_contents].is_null()) {
+            if (json.contains(key_contents) && json[key_contents].is_string()) {
                 contents = json[key_contents].get<std::string>();
             }
             if (!contents.empty()) {
