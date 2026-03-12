@@ -3357,6 +3357,28 @@ std::string KeyAuth::api::req(std::string data, const std::string& url) {
         }
     }
 
+
+
+    if (is_hooked((void*)&curl_easy_perform))
+    {
+        error(XorStr("Hook detected in curl_easy_perform"));
+    }
+
+    if (is_hooked((void*)&curl_easy_init))
+    {
+        error(XorStr("Hook detected in curl_easy_init"));
+    }
+
+    if (is_hooked((void*)&curl_easy_setopt))
+    {
+        error(XorStr("Hook detected in curl_easy_setopt"));
+    }
+
+    if (is_hooked((void*)&curl_easy_cleanup))
+    {
+        error(XorStr("Hook detected in curl_easy_cleanup"));
+    }
+
     CURL* curl = curl_easy_init();
     if (!curl) {
         error(XorStr("CURL Initialization Failed!"));
