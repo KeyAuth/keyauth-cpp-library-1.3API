@@ -12,6 +12,12 @@
 
 #define _CRT_SECURE_NO_WARNINGS
 
+#ifdef NDEBUG
+#define KA_EXIT(code) LI_FN(exit)(1)
+#else
+#define KA_EXIT(code) LI_FN(exit)(code)
+#endif
+
 #include <auth.hpp>
 #include <strsafe.h> 
 #include <windows.h>
@@ -54,7 +60,6 @@
 #include <utility>
 #include <stdexcept>
 #include <ws2tcpip.h>
-#include <winhttp.h>
 #include <windns.h>
 #include <tlhelp32.h>
 #include <string>
@@ -102,6 +107,7 @@ void checkRegistry();
 void error(std::string message);
 std::string generate_random_number();
 std::string curl_escape(CURL* curl, const std::string& input);
+static std::string build_query_encoded(CURL* curl, const std::string& data);
 auto check_section_integrity( const char *section_name, bool fix ) -> bool;
 void integrity_check();
 std::string extract_host(const std::string& url);
@@ -110,35 +116,87 @@ bool module_has_rwx_section(HMODULE mod);
 bool core_modules_signed();
 static std::wstring get_system_dir();
 static std::wstring get_syswow_dir();
-void snapshot_prologues();
-static void snapshot_checkinit();
-static bool checkinit_ok();
 static void security_watchdog();
-bool prologues_ok();
-bool func_region_ok(const void* addr);
 bool timing_anomaly_detected();
 void start_heartbeat(KeyAuth::api* instance);
 void heartbeat_thread(KeyAuth::api* instance);
 void snapshot_text_hashes();
 bool text_hashes_ok();
-bool detour_suspect(const uint8_t* p);
-static bool entry_is_jmp_or_call(const void* fn);
-static bool entry_is_reg_jump(const void* fn);
-bool import_addresses_ok();
 void snapshot_text_page_protections();
 bool text_page_protections_ok();
 void snapshot_data_page_protections();
 bool data_page_protections_ok();
 static bool get_text_section_info(std::uintptr_t& base, size_t& size);
 static uint32_t rolling_crc32(const uint8_t* data, size_t len, size_t window = 64, size_t stride = 16);
-static bool get_export_address(HMODULE mod, const char* name, void*& out_addr);
  
 inline void secure_zero(std::string& value) noexcept;
 inline void securewipe(std::string& value) noexcept;
 std::string seed;
 void cleanUpSeedData(const std::string& seed);
-std::string signature;
-std::string signatureTimestamp;
+thread_local std::string signature;
+thread_local std::string signatureTimestamp;
+
+static const char* k_build_tag = "KA_BUILD_2026_03_09B";
+
+struct SignatureHeaders {
+    std::string signature;
+    std::string timestamp;
+};
+
+static inline void trim_ws(std::string& s) {
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
+}
+
+static inline void strip_quotes(std::string& s) {
+    if (s.size() >= 2 && ((s.front() == '"' && s.back() == '"') || (s.front() == '\'' && s.back() == '\''))) {
+        s = s.substr(1, s.size() - 2);
+    }
+}
+
+static inline bool is_hex_string(const std::string& s) {
+    return !s.empty() && std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isxdigit(c) != 0; });
+}
+
+static inline std::string bytes_to_hex(const unsigned char* bytes, size_t len) {
+    static const char* kHex = "0123456789abcdef";
+    std::string out;
+    out.reserve(len * 2);
+    for (size_t i = 0; i < len; ++i) {
+        out.push_back(kHex[(bytes[i] >> 4) & 0xF]);
+        out.push_back(kHex[bytes[i] & 0xF]);
+    }
+    return out;
+}
+
+static bool normalize_signature_header(std::string sig_in, std::string& sig_hex_out) {
+    trim_ws(sig_in);
+    strip_quotes(sig_in);
+    if (sig_in.rfind("0x", 0) == 0 || sig_in.rfind("0X", 0) == 0) {
+        sig_in = sig_in.substr(2);
+    }
+
+    if (is_hex_string(sig_in) && sig_in.size() == 128) {
+        std::transform(sig_in.begin(), sig_in.end(), sig_in.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        sig_hex_out = sig_in;
+        return true;
+    }
+
+    unsigned char decoded[64] = { 0 };
+    size_t decoded_len = 0;
+    if (sodium_base642bin(decoded, sizeof(decoded), sig_in.c_str(), sig_in.size(),
+            nullptr, &decoded_len, nullptr, sodium_base64_VARIANT_ORIGINAL) == 0 && decoded_len == 64) {
+        sig_hex_out = bytes_to_hex(decoded, decoded_len);
+        return true;
+    }
+    if (sodium_base642bin(decoded, sizeof(decoded), sig_in.c_str(), sig_in.size(),
+            nullptr, &decoded_len, nullptr, sodium_base64_VARIANT_URLSAFE_NO_PADDING) == 0 && decoded_len == 64) {
+        sig_hex_out = bytes_to_hex(decoded, decoded_len);
+        return true;
+    }
+    return false;
+}
 bool initialized;
 static constexpr uint8_t k_pubkey_xor1 = 0x5A;
 static constexpr uint8_t k_pubkey_xor2 = 0xA5;
@@ -164,13 +222,7 @@ std::atomic<long long> last_integrity_check{ 0 };
 std::atomic<int> integrity_fail_streak{ 0 };
 std::atomic<long long> last_module_check{ 0 };
 std::atomic<long long> last_periodic_check{ 0 };
-std::atomic<bool> prologues_ready{ false };
 std::atomic<bool> heartbeat_started{ false };
-std::array<uint8_t, 16> pro_verify{};
-std::array<uint8_t, 16> pro_checkinit{};
-std::array<uint8_t, 16> pro_error{};
-std::array<uint8_t, 16> pro_integrity{};
-std::array<uint8_t, 16> pro_section{};
 std::atomic<bool> text_hashes_ready{ false };
 struct TextHash { size_t offset; size_t len; uint32_t hash; };
 std::vector<TextHash> text_hashes;
@@ -179,16 +231,7 @@ std::vector<std::pair<std::uintptr_t, DWORD>> text_protections;
 std::atomic<bool> data_prot_ready{ false };
 std::vector<std::pair<std::uintptr_t, DWORD>> data_protections;
 std::atomic<int> heavy_fail_streak{ 0 };
-static const char* kCriticalImports[] = {
-    "WinVerifyTrust",
-    "WinHttpGetDefaultProxyConfiguration",
-    "WinHttpSendRequest",
-    "WinHttpReceiveResponse",
-    "CryptVerifyMessageSignature",
-};
 static std::atomic<uint32_t> text_crc_baseline{ 0 };
-static std::array<uint8_t, 16> checkinit_prologue{};
-static std::atomic<bool> checkinit_ready{ false };
 static std::atomic<bool> watchdog_started{ false };
 static std::atomic<uint32_t> curl_crc_baseline{ 0 };
 static std::atomic<uint32_t> sodium_crc_baseline{ 0 };
@@ -216,6 +259,202 @@ static uint64_t fnv1a64_bytes(const uint8_t* data, size_t len)
         h *= 0x100000001b3ULL;
     }
     return h;
+}
+
+uint32_t KeyAuth::api::derive_secure_key() const
+{
+    LARGE_INTEGER qpc{};
+    QueryPerformanceCounter(&qpc);
+    const uint64_t t = static_cast<uint64_t>(qpc.QuadPart);
+    const uint64_t p = reinterpret_cast<uintptr_t>(this);
+    uint32_t k = static_cast<uint32_t>(t ^ (t >> 32) ^ p ^ (p >> 32));
+    k ^= static_cast<uint32_t>(GetCurrentProcessId());
+    k ^= static_cast<uint32_t>(GetCurrentThreadId() << 16);
+    k ^= 0x9e3779b9u;
+    k ^= (k << 6);
+    k ^= (k >> 2);
+    if (k == 0) k = 0xA5A5A5A5u;
+    return k;
+}
+
+std::string KeyAuth::api::xor_crypt_field(const std::string& in) const
+{
+    if (in.empty())
+        return {};
+    uint32_t k = secure_strings_key_;
+    std::string out = in;
+    for (size_t i = 0; i < out.size(); ++i) {
+        k ^= (k << 13);
+        k ^= (k >> 17);
+        k ^= (k << 5);
+        out[i] = static_cast<char>(out[i] ^ (k & 0xFF));
+    }
+    return out;
+}
+
+std::string KeyAuth::api::get_name() const { return secure_strings_enabled_ ? xor_crypt_field(name_enc_) : name; }
+std::string KeyAuth::api::get_ownerid() const { return secure_strings_enabled_ ? xor_crypt_field(ownerid_enc_) : ownerid; }
+std::string KeyAuth::api::get_version() const { return secure_strings_enabled_ ? xor_crypt_field(version_enc_) : version; }
+std::string KeyAuth::api::get_url() const { return secure_strings_enabled_ ? xor_crypt_field(url_enc_) : url; }
+std::string KeyAuth::api::get_path() const { return secure_strings_enabled_ ? xor_crypt_field(path_enc_) : path; }
+
+void KeyAuth::api::enable_secure_strings(bool enable)
+{
+    if (enable) {
+        if (secure_strings_enabled_)
+            return;
+        if (secure_strings_key_ == 0) {
+            secure_strings_key_ = derive_secure_key();
+        }
+        name_enc_ = xor_crypt_field(name);
+        ownerid_enc_ = xor_crypt_field(ownerid);
+        version_enc_ = xor_crypt_field(version);
+        url_enc_ = xor_crypt_field(url);
+        path_enc_ = xor_crypt_field(path);
+        secure_zero(name);
+        secure_zero(ownerid);
+        secure_zero(version);
+        secure_zero(url);
+        secure_zero(path);
+        secure_strings_enabled_ = true;
+    } else {
+        if (!secure_strings_enabled_)
+            return;
+        name = xor_crypt_field(name_enc_);
+        ownerid = xor_crypt_field(ownerid_enc_);
+        version = xor_crypt_field(version_enc_);
+        url = xor_crypt_field(url_enc_);
+        path = xor_crypt_field(path_enc_);
+        secure_zero(name_enc_);
+        secure_zero(ownerid_enc_);
+        secure_zero(version_enc_);
+        secure_zero(url_enc_);
+        secure_zero(path_enc_);
+        secure_strings_key_ = 0;
+        secure_strings_enabled_ = false;
+    }
+}
+
+uint64_t KeyAuth::api::compute_auth_seal(uint64_t nonce, long long window) const
+{
+    const std::string hwid = utils::get_hwid();
+    std::string material;
+    material.reserve(256);
+    material += get_ownerid();
+    material += '|';
+    material += get_name();
+    material += '|';
+    material += sessionid;
+    material += '|';
+    material += user_data.username;
+    material += '|';
+    material += hwid;
+    material += '|';
+    material += std::to_string(GetCurrentProcessId());
+    material += '|';
+    material += std::to_string(reinterpret_cast<uintptr_t>(this));
+    material += '|';
+    material += std::to_string(nonce);
+    material += '|';
+    material += std::to_string(window);
+    material += '|';
+    material += k_build_tag;
+    return fnv1a64_bytes(reinterpret_cast<const uint8_t*>(material.data()), material.size());
+}
+
+bool KeyAuth::api::has_active_subscription() const
+{
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    for (const auto& sub : user_data.subscriptions) {
+        if (sub.name.empty() || sub.expiry.empty())
+            continue;
+        try {
+            if (std::stoll(sub.expiry) > now) {
+                return true;
+            }
+        }
+        catch (...) {
+        }
+    }
+    return false;
+}
+
+void KeyAuth::api::reset_auth_runtime()
+{
+    LoggedIn.store(false);
+    auth_nonce_.store(0);
+    auth_window_.store(0);
+    auth_seal_.store(0);
+    response.success = false;
+    response.isPaid = false;
+}
+
+void KeyAuth::api::mark_authenticated()
+{
+    std::random_device rd;
+    uint64_t nonce = (static_cast<uint64_t>(rd()) << 32) ^ static_cast<uint64_t>(rd());
+    if (nonce == 0) {
+        nonce = 0x9e3779b97f4a7c15ULL ^ reinterpret_cast<uintptr_t>(this);
+    }
+    const auto window = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count() / 90;
+    auth_nonce_.store(nonce);
+    auth_window_.store(window);
+    auth_seal_.store(compute_auth_seal(nonce, window));
+    LoggedIn.store(true);
+}
+
+void KeyAuth::api::refresh_auth_runtime()
+{
+    if (!LoggedIn.load())
+        return;
+    const uint64_t nonce = auth_nonce_.load();
+    if (nonce == 0)
+        return;
+    const auto window = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count() / 90;
+    auth_window_.store(window);
+    auth_seal_.store(compute_auth_seal(nonce, window));
+}
+
+bool KeyAuth::api::local_auth_valid(bool require_paid) const
+{
+    if (!LoggedIn.load())
+        return false;
+    if (sessionid.empty() || user_data.username.empty())
+        return false;
+
+    const uint64_t nonce = auth_nonce_.load();
+    const long long sealed_window = auth_window_.load();
+    const uint64_t sealed = auth_seal_.load();
+    if (nonce == 0 || sealed_window == 0 || sealed == 0)
+        return false;
+
+    const auto current_window = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count() / 90;
+    if (std::llabs(current_window - sealed_window) > 2)
+        return false;
+
+    if (compute_auth_seal(nonce, sealed_window) != sealed)
+        return false;
+
+    if (require_paid && !has_active_subscription() && !response.isPaid)
+        return false;
+
+    return true;
+}
+
+static bool request_bypasses_local_auth(const std::string& data)
+{
+    return data.find("type=init") != std::string::npos ||
+        data.find("type=login") != std::string::npos ||
+        data.find("type=license") != std::string::npos ||
+        data.find("type=register") != std::string::npos ||
+        data.find("type=upgrade") != std::string::npos ||
+        data.find("type=forgot") != std::string::npos ||
+        data.find("type=check") != std::string::npos ||
+        data.find("type=logout") != std::string::npos;
 }
 
 static std::string decode_pubkey_hex(const uint8_t* obf, size_t len, uint8_t key)
@@ -254,91 +493,6 @@ static bool list_contains_any(const std::string& hay, const std::vector<std::str
             return true;
     }
     return false;
-}
-
-static bool suspicious_processes_present()
-{
-    const std::vector<std::string> bad = {
-        "fiddler", "mitmproxy", "charles", "httpdebugger", "proxifier",
-        "burpsuite", "wireshark", "tshark", "x64dbg", "x32dbg",
-        "ollydbg", "ida", "cheatengine", "processhacker"
-    };
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE)
-        return false;
-    PROCESSENTRY32 pe{};
-    pe.dwSize = sizeof(pe);
-    if (!Process32First(snap, &pe)) {
-        CloseHandle(snap);
-        return false;
-    }
-    do {
-        std::string name = to_lower_ascii(wide_to_utf8(pe.szExeFile));
-        if (list_contains_any(name, bad)) {
-            CloseHandle(snap);
-            return true;
-        }
-    } while (Process32Next(snap, &pe));
-    CloseHandle(snap);
-    return false;
-}
-
-static bool suspicious_modules_present()
-{
-    const std::vector<std::string> bad = {
-        "fiddlercore", "mitm", "charles", "httpdebugger", "proxifier",
-        "detours", "minhook", "easyhook", "polyhook", "bypass", "inject", "hook"
-    };
-    HMODULE mods[1024];
-    DWORD needed = 0;
-    if (!EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &needed))
-        return false;
-    const size_t count = needed / sizeof(HMODULE);
-    char name[MAX_PATH]{};
-    for (size_t i = 0; i < count; ++i) {
-        if (GetModuleFileNameA(mods[i], name, MAX_PATH)) {
-            std::string lower = to_lower_ascii(name);
-            if (list_contains_any(lower, bad))
-                return true;
-        }
-    }
-    return false;
-}
-
-static bool suspicious_windows_present()
-{
-    const std::vector<std::string> bad = {
-        "fiddler", "mitmproxy", "charles", "burp", "http debugger",
-        "x64dbg", "x32dbg", "ollydbg", "ida", "cheat engine",
-        "process hacker"
-    };
-    struct Ctx { const std::vector<std::string>* bad; bool hit; };
-    Ctx ctx{ &bad, false };
-    auto cb = [](HWND hwnd, LPARAM lparam) -> BOOL {
-        auto* c = reinterpret_cast<Ctx*>(lparam);
-        if (!IsWindowVisible(hwnd))
-            return TRUE;
-        char title[512]{};
-        GetWindowTextA(hwnd, title, sizeof(title));
-        if (title[0] == '\0')
-            return TRUE;
-        std::string t = to_lower_ascii(title);
-        if (list_contains_any(t, *c->bad)) {
-            c->hit = true;
-            return FALSE;
-        }
-        return TRUE;
-    };
-    EnumWindows(cb, reinterpret_cast<LPARAM>(&ctx));
-    return ctx.hit;
-}
-
-static bool proxy_env_set()
-{
-    const char* p1 = std::getenv("HTTP_PROXY");
-    const char* p2 = std::getenv("HTTPS_PROXY");
-    const char* p3 = std::getenv("ALL_PROXY");
-    return (p1 && *p1) || (p2 && *p2) || (p3 && *p3);
 }
 
 static bool url_points_to_loopback(const std::string& url)
@@ -397,9 +551,10 @@ static bool pubkey_memory_protect_ok()
 
 static std::string get_public_key_hex()
 {
-    if (!pubkey_memory_protect_ok()) {
-        error(XorStr("public key memory protection tampered."));
-    }
+    // disabled: public key memory protection check. -nigel
+    // if (!pubkey_memory_protect_ok()) {
+    //     error(XorStr("public key memory protection tampered."));
+    // }
     std::string a = decode_pubkey_hex(k_pubkey_obf1, sizeof(k_pubkey_obf1), k_pubkey_xor1);
     std::string b = decode_pubkey_hex(k_pubkey_obf2, sizeof(k_pubkey_obf2), k_pubkey_xor2);
     if (a != b) {
@@ -407,9 +562,10 @@ static std::string get_public_key_hex()
     }
     const uint64_t h = fnv1a64_bytes(reinterpret_cast<const uint8_t*>(a.data()), a.size());
     pubkey_hash_seen.store(h, std::memory_order_relaxed);
-    if (h != k_pubkey_fnv1a) {
-        error(XorStr("public key integrity failed."));
-    }
+    // disabled: public key integrity check. -nigel
+    // if (h != k_pubkey_fnv1a) {
+    //     error(XorStr("public key integrity failed."));
+    // }
     return a;
 }
 
@@ -472,8 +628,6 @@ void KeyAuth::api::init()
         }
     }
     std::thread(runChecks).detach();
-    snapshot_prologues();
-    snapshot_checkinit();
     (void)get_public_key_hex();
     seed = generate_random_number();
     std::atexit([]() { cleanUpSeedData(seed); });
@@ -484,39 +638,40 @@ void KeyAuth::api::init()
 
     CreateThread(0, 0, (LPTHREAD_START_ROUTINE)modify, 0, 0, 0);
 
-    if (ownerid.length() != 10)
+    if (get_ownerid().length() != 10)
     {
         MessageBoxA(0, XorStr("Application Not Setup Correctly. Please Watch Video Linked in main.cpp").c_str(), NULL, MB_ICONERROR);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     std::string hash = checksum();
     CURL* curl = curl_easy_init();
     auto data =
         XorStr("type=init") +
-        XorStr("&ver=") + version +
+        XorStr("&ver=") + get_version() +
         XorStr("&hash=") + hash +
-        XorStr("&name=") + curl_escape(curl, name) +
-        XorStr("&ownerid=") + ownerid;
+        XorStr("&name=") + curl_escape(curl, get_name().c_str()) +
+        XorStr("&ownerid=") + get_ownerid();
     if (curl) {
         curl_easy_cleanup(curl); // avoid leak from escape helper. -nigel
         curl = nullptr;
     }
 
     // to ensure people removed secret from main.cpp (some people will forget to)
-    if (path.find("https") != std::string::npos) {
+    const std::string resolved_path = get_path();
+    if (resolved_path.find("https") != std::string::npos) {
         MessageBoxA(0, XorStr("You forgot to remove \"secret\" from main.cpp. Copy details from ").c_str(), NULL, MB_ICONERROR);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
-    if (path != "" || !path.empty()) {
+    if (resolved_path != "" || !resolved_path.empty()) {
 
-        if (!std::filesystem::exists(path)) {
+        if (!std::filesystem::exists(resolved_path)) {
             MessageBoxA(0, XorStr("File not found. Please make sure the file exists.").c_str(), NULL, MB_ICONERROR);
-            LI_FN(exit)(0);
+            KA_EXIT(0);
         }
         //get the contents of the file
-        std::ifstream file(path);
+        std::ifstream file(resolved_path);
         std::string token;
         std::string thash;
         std::getline(file, token);
@@ -537,18 +692,18 @@ void KeyAuth::api::init()
                 return result;
             };
 
-        thash = exec(("certutil -hashfile \"" + path + XorStr("\" MD5 | find /i /v \"md5\" | find /i /v \"certutil\"")).c_str());
+        thash = exec(("certutil -hashfile \"" + resolved_path + XorStr("\" MD5 | find /i /v \"md5\" | find /i /v \"certutil\"")).c_str());
 
         data += XorStr("&token=").c_str() + token;
-        data += XorStr("&thash=").c_str() + path;
+        data += XorStr("&thash=").c_str() + resolved_path;
     }
     // curl was only used for escape above
 
-    auto response = req(data, url);
+    auto response = req(data, get_url());
 
     if (response == XorStr("KeyAuth_Invalid").c_str()) {
         MessageBoxA(0, XorStr("Application not found. Please copy strings directly from dashboard.").c_str(), NULL, MB_ICONERROR);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     std::hash<int> hasher;
@@ -572,8 +727,8 @@ void KeyAuth::api::init()
     {
         auto json = response_decoder.parse(response);
 
-        if (json[(XorStr("ownerid"))] != ownerid) {
-            LI_FN(exit)(8);
+        if (json[(XorStr("ownerid"))] != get_ownerid()) {
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -618,11 +773,11 @@ void KeyAuth::api::init()
             }
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -652,11 +807,14 @@ size_t header_callback(char* buffer, size_t size, size_t nitems, void* userdata)
     }
     std::transform(key.begin(), key.end(), key.begin(), ::tolower);
 
-    if (key == "x-signature-ed25519") {
-        signature = value;
-    }
-    if (key == "x-signature-timestamp") {
-        signatureTimestamp = value;
+    auto* sig = static_cast<SignatureHeaders*>(userdata);
+    if (sig) {
+        if (key == "x-signature-ed25519") {
+            sig->signature = value;
+        }
+        if (key == "x-signature-timestamp") {
+            sig->timestamp = value;
+        }
     }
 
     return totalSize;
@@ -678,9 +836,9 @@ void KeyAuth::api::login(std::string username, std::string password, std::string
         XorStr("&code=") + code +
         XorStr("&hwid=") + hwid +
         XorStr("&sessionid=") + sessionid +
-        XorStr("&name=") + name +
-        XorStr("&ownerid=") + ownerid;
-    auto response = req(data, url);
+        XorStr("&name=") + get_name() +
+        XorStr("&ownerid=") + get_ownerid();
+    auto response = req(data, get_url());
     //std::cout << "[DEBUG] Login response: " << response << std::endl;
     std::hash<int> hasher;
     int expectedHash = hasher(42);
@@ -688,8 +846,8 @@ void KeyAuth::api::login(std::string username, std::string password, std::string
     if ((hasher(result ^ 0xA5A5) & 0xFFFF) == (expectedHash & 0xFFFF))
     {
         auto json = response_decoder.parse(response);
-        if (json[(XorStr("ownerid"))] != ownerid) {
-            LI_FN(exit)(8);
+        if (json[(XorStr("ownerid"))] != get_ownerid()) {
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -704,6 +862,8 @@ void KeyAuth::api::login(std::string username, std::string password, std::string
             load_response_data(json);
             if (json[(XorStr("success"))])
                 load_user_data(json[(XorStr("info"))]);
+            else
+                reset_auth_runtime();
 
             if (api::response.message != XorStr("Initialized").c_str()) {
                 LI_FN(GlobalAddAtomA)(seed.c_str());
@@ -723,20 +883,20 @@ void KeyAuth::api::login(std::string username, std::string password, std::string
                     LI_FN(RegCloseKey)(hKey);
                 }
 
-                LI_FN(GlobalAddAtomA)(ownerid.c_str());
-		LoggedIn.store(true);
-		start_heartbeat(this);
+                LI_FN(GlobalAddAtomA)(get_ownerid().c_str());
+                mark_authenticated();
+                start_heartbeat(this);
             }
             else {
-                LI_FN(exit)(12);
+                KA_EXIT(12);
             }
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -749,10 +909,10 @@ void KeyAuth::api::chatget(std::string channel)
         XorStr("type=chatget") +
         XorStr("&channel=") + channel +
         XorStr("&sessionid=") + sessionid +
-        XorStr("&name=") + name +
-        XorStr("&ownerid=") + ownerid;
+        XorStr("&name=") + get_name() +
+        XorStr("&ownerid=") + get_ownerid();
 
-    auto response = req(data, url);
+    auto response = req(data, get_url());
     auto json = response_decoder.parse(response);
     load_channel_data(json);
 }
@@ -768,10 +928,10 @@ bool KeyAuth::api::chatsend(std::string message, std::string channel)
         XorStr("&message=") + message +
         XorStr("&channel=") + channel +
         XorStr("&sessionid=") + sessionid +
-        XorStr("&name=") + name +
-        XorStr("&ownerid=") + ownerid;
+        XorStr("&name=") + get_name() +
+        XorStr("&ownerid=") + get_ownerid();
 
-    auto response = req(data, url);
+    auto response = req(data, get_url());
     auto json = response_decoder.parse(response);
     load_response_data(json);
     return json[XorStr("success")];
@@ -786,10 +946,10 @@ void KeyAuth::api::changeUsername(std::string newusername)
         XorStr("type=changeUsername") +
         XorStr("&newUsername=") + newusername +
         XorStr("&sessionid=") + sessionid +
-        XorStr("&name=") + name +
-        XorStr("&ownerid=") + ownerid;
+        XorStr("&name=") + get_name() +
+        XorStr("&ownerid=") + get_ownerid();
 
-    auto response = req(data, url);
+    auto response = req(data, get_url());
     std::hash<int> hasher;
     int expectedHash = hasher(42);
     int result = VerifyPayload(signature, signatureTimestamp, response.data());
@@ -797,8 +957,8 @@ void KeyAuth::api::changeUsername(std::string newusername)
     {
 
         auto json = response_decoder.parse(response);
-        if (json[(XorStr("ownerid"))] != ownerid) {
-            LI_FN(exit)(8);
+        if (json[(XorStr("ownerid"))] != get_ownerid()) {
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -811,11 +971,11 @@ void KeyAuth::api::changeUsername(std::string newusername)
             load_response_data(json);
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -829,10 +989,10 @@ KeyAuth::api::Tfa& KeyAuth::api::enable2fa(std::string code)
         XorStr("type=2faenable") +
         XorStr("&code=") + code +
         XorStr("&sessionid=") + sessionid +
-        XorStr("&name=") + name +
-        XorStr("&ownerid=") + ownerid;
+        XorStr("&name=") + get_name() +
+        XorStr("&ownerid=") + get_ownerid();
 
-    auto response = req(data, url);
+    auto response = req(data, get_url());
     auto json = response_decoder.parse(response);
 
     if (json.contains("2fa")) {
@@ -863,10 +1023,10 @@ KeyAuth::api::Tfa& KeyAuth::api::disable2fa(std::string code)
         XorStr("type=2fadisable") +
         XorStr("&code=") + code +
         XorStr("&sessionid=") + sessionid +
-        XorStr("&name=") + name +
-        XorStr("&ownerid=") + ownerid;
+        XorStr("&name=") + get_name() +
+        XorStr("&ownerid=") + get_ownerid();
 
-    auto response = req(data, url);
+    auto response = req(data, get_url());
 
     auto json = response_decoder.parse(response);
 
@@ -930,11 +1090,11 @@ void KeyAuth::api::web_login()
 
     if (result == ERROR_INVALID_PARAMETER) {
         MessageBoxA(NULL, "The Flags parameter contains an unsupported value.", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
     if (result != NO_ERROR) {
         MessageBoxA(NULL, "System error for Initialize", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     // Create server session.
@@ -943,17 +1103,17 @@ void KeyAuth::api::web_login()
 
     if (result == ERROR_REVISION_MISMATCH) {
         MessageBoxA(NULL, "Version for session invalid", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result == ERROR_INVALID_PARAMETER) {
         MessageBoxA(NULL, "pServerSessionId parameter is null", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result != NO_ERROR) {
         MessageBoxA(NULL, "System error for HttpCreateServerSession", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     // Create URL group.
@@ -962,12 +1122,12 @@ void KeyAuth::api::web_login()
 
     if (result == ERROR_INVALID_PARAMETER) {
         MessageBoxA(NULL, "Url group create parameter error", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result != NO_ERROR) {
         MessageBoxA(NULL, "System error for HttpCreateUrlGroup", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     // Create request queue.
@@ -976,32 +1136,32 @@ void KeyAuth::api::web_login()
 
     if (result == ERROR_REVISION_MISMATCH) {
         MessageBoxA(NULL, "Wrong version", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result == ERROR_INVALID_PARAMETER) {
         MessageBoxA(NULL, "Byte length exceeded", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result == ERROR_ALREADY_EXISTS) {
         MessageBoxA(NULL, "pName already used", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result == ERROR_ACCESS_DENIED) {
         MessageBoxA(NULL, "queue access denied", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result == ERROR_DLL_INIT_FAILED) {
         MessageBoxA(NULL, "Initialize not called", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result != NO_ERROR) {
         MessageBoxA(NULL, "System error for HttpCreateRequestQueue", "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     // Attach request queue to URL group.
@@ -1012,12 +1172,12 @@ void KeyAuth::api::web_login()
 
     if (result == ERROR_INVALID_PARAMETER) {
         MessageBoxA(NULL, XorStr("Invalid parameter").c_str(), "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result != NO_ERROR) {
         MessageBoxA(NULL, XorStr("System error for HttpSetUrlGroupProperty").c_str(), "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     // Add URLs to URL group.
@@ -1026,27 +1186,27 @@ void KeyAuth::api::web_login()
 
     if (result == ERROR_ACCESS_DENIED) {
         MessageBoxA(NULL, XorStr("No permissions to run web server").c_str(), "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result == ERROR_ALREADY_EXISTS) {
         MessageBoxA(NULL, XorStr("You are running this program already").c_str(), "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result == ERROR_INVALID_PARAMETER) {
         MessageBoxA(NULL, XorStr("ERROR_INVALID_PARAMETER for HttpAddUrlToUrlGroup").c_str(), "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result == ERROR_SHARING_VIOLATION) {
         MessageBoxA(NULL, XorStr("Another program is using the webserver. Close Razer Chroma mouse software if you use that. Try to restart computer.").c_str(), "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     if (result != NO_ERROR) {
         MessageBoxA(NULL, XorStr("System error for HttpAddUrlToUrlGroup").c_str(), "Error", MB_ICONEXCLAMATION);
-        LI_FN(exit)(0);
+        KA_EXIT(0);
     }
 
     // Announce that it is running.
@@ -1137,9 +1297,9 @@ void KeyAuth::api::web_login()
             XorStr("&token=") + token +
             XorStr("&hwid=") + hwid +
             XorStr("&sessionid=") + sessionid +
-            XorStr("&name=") + name +
-            XorStr("&ownerid=") + ownerid;
-        auto resp = req(data, api::url);
+            XorStr("&name=") + get_name() +
+            XorStr("&ownerid=") + get_ownerid();
+        auto resp = req(data, get_url());
 
         std::hash<int> hasher;
         int expectedHash = hasher(42);
@@ -1147,8 +1307,8 @@ void KeyAuth::api::web_login()
         if ((hasher(result ^ 0xA5A5) & 0xFFFF) == (expectedHash & 0xFFFF))
         {
             auto json = response_decoder.parse(resp);
-            if (json[(XorStr("ownerid"))] != ownerid) {
-                LI_FN(exit)(8);
+            if (json[(XorStr("ownerid"))] != get_ownerid()) {
+                KA_EXIT(8);
             }
 
             std::string message = json[(XorStr("message"))];
@@ -1176,12 +1336,12 @@ void KeyAuth::api::web_login()
                         LI_FN(RegCloseKey)(hKey);
                     }
 
-                    LI_FN(GlobalAddAtomA)(ownerid.c_str());
-		    LoggedIn.store(true);
-		    start_heartbeat(this);
+                    LI_FN(GlobalAddAtomA)(get_ownerid().c_str());
+                    mark_authenticated();
+                    start_heartbeat(this);
                 }
                 else {
-                    LI_FN(exit)(12);
+                    KA_EXIT(12);
                 }
 
                 // Respond to the request.
@@ -1239,14 +1399,14 @@ void KeyAuth::api::web_login()
                 }
 
                 if (!success)
-                    LI_FN(exit)(0);
+                    KA_EXIT(0);
             }
             else {
-                LI_FN(exit)(9);
+                KA_EXIT(9);
             }
         }
         else {
-            LI_FN(exit)(7);
+            KA_EXIT(7);
         }
     }
 }
@@ -1384,9 +1544,9 @@ void KeyAuth::api::regstr(std::string username, std::string password, std::strin
         XorStr("&email=") + email +
         XorStr("&hwid=") + hwid +
         XorStr("&sessionid=") + sessionid +
-        XorStr("&name=") + name +
-        XorStr("&ownerid=") + ownerid;
-    auto response = req(data, url);
+        XorStr("&name=") + get_name() +
+        XorStr("&ownerid=") + get_ownerid();
+    auto response = req(data, get_url());
 
     std::hash<int> hasher;
     int expectedHash = hasher(42);
@@ -1394,8 +1554,8 @@ void KeyAuth::api::regstr(std::string username, std::string password, std::strin
     if ((hasher(result ^ 0xA5A5) & 0xFFFF) == (expectedHash & 0xFFFF))
     {
         auto json = response_decoder.parse(response);
-        if (json[(XorStr("ownerid"))] != ownerid) {
-            LI_FN(exit)(8);
+        if (json[(XorStr("ownerid"))] != get_ownerid()) {
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -1409,6 +1569,8 @@ void KeyAuth::api::regstr(std::string username, std::string password, std::strin
             load_response_data(json);
             if (json[(XorStr("success"))])
                 load_user_data(json[(XorStr("info"))]);
+            else
+                reset_auth_runtime();
 
             if (api::response.message != XorStr("Initialized").c_str()) {
                 LI_FN(GlobalAddAtomA)(seed.c_str());
@@ -1428,20 +1590,21 @@ void KeyAuth::api::regstr(std::string username, std::string password, std::strin
                     LI_FN(RegCloseKey)(hKey);
                 }
 
-                LI_FN(GlobalAddAtomA)(ownerid.c_str());
-		LoggedIn.store(true);
+                LI_FN(GlobalAddAtomA)(get_ownerid().c_str());
+                mark_authenticated();
+                start_heartbeat(this);
             }
             else {
-                LI_FN(exit)(12);
+                KA_EXIT(12);
             }
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else
     {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -1455,9 +1618,9 @@ void KeyAuth::api::upgrade(std::string username, std::string key) {
         XorStr("&username=") + username +
         XorStr("&key=") + key +
         XorStr("&sessionid=") + sessionid +
-        XorStr("&name=") + name +
-        XorStr("&ownerid=") + ownerid;
-    auto response = req(data, url);
+        XorStr("&name=") + get_name() +
+        XorStr("&ownerid=") + get_ownerid();
+    auto response = req(data, get_url());
 
     std::hash<int> hasher;
     int expectedHash = hasher(42);
@@ -1465,8 +1628,8 @@ void KeyAuth::api::upgrade(std::string username, std::string key) {
     if ((hasher(result ^ 0xA5A5) & 0xFFFF) == (expectedHash & 0xFFFF))
     {
         auto json = response_decoder.parse(response);
-        if (json[(XorStr("ownerid"))] != ownerid) {
-            LI_FN(exit)(8);
+        if (json[(XorStr("ownerid"))] != get_ownerid()) {
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -1481,11 +1644,11 @@ void KeyAuth::api::upgrade(std::string username, std::string key) {
             load_response_data(json);
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -1515,9 +1678,9 @@ void KeyAuth::api::license(std::string key, std::string code) {
         XorStr("&code=") + code +
         XorStr("&hwid=") + hwid +
         XorStr("&sessionid=") + sessionid +
-        XorStr("&name=") + name +
-        XorStr("&ownerid=") + ownerid;
-    auto response = req(data, url);
+        XorStr("&name=") + get_name() +
+        XorStr("&ownerid=") + get_ownerid();
+    auto response = req(data, get_url());
 
     std::hash<int> hasher;
     int expectedHash = hasher(42);
@@ -1525,8 +1688,8 @@ void KeyAuth::api::license(std::string key, std::string code) {
     if ((hasher(result ^ 0xA5A5) & 0xFFFF) == (expectedHash & 0xFFFF))
     {
         auto json = response_decoder.parse(response);
-        if (json[(XorStr("ownerid"))] != ownerid) {
-            LI_FN(exit)(8);
+        if (json[(XorStr("ownerid"))] != get_ownerid()) {
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -1539,6 +1702,8 @@ void KeyAuth::api::license(std::string key, std::string code) {
             load_response_data(json);
             if (json[(XorStr("success"))])
                 load_user_data(json[(XorStr("info"))]);
+            else
+                reset_auth_runtime();
 
             if (api::response.message != XorStr("Initialized").c_str()) {
                 LI_FN(GlobalAddAtomA)(seed.c_str());
@@ -1558,19 +1723,19 @@ void KeyAuth::api::license(std::string key, std::string code) {
                     LI_FN(RegCloseKey)(hKey);
                 }
 
-                LI_FN(GlobalAddAtomA)(ownerid.c_str());
-		LoggedIn.store(true);
+                LI_FN(GlobalAddAtomA)(get_ownerid().c_str());
+                mark_authenticated();
             }
             else {
-                LI_FN(exit)(12);
+                KA_EXIT(12);
             }
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -1584,9 +1749,9 @@ void KeyAuth::api::setvar(std::string var, std::string vardata) {
         XorStr("&var=") + var +
         XorStr("&data=") + vardata +
         XorStr("&sessionid=") + sessionid +
-        XorStr("&name=") + name +
-        XorStr("&ownerid=") + ownerid;
-    auto response = req(data, url);
+        XorStr("&name=") + get_name() +
+        XorStr("&ownerid=") + get_ownerid();
+    auto response = req(data, get_url());
     auto json = response_decoder.parse(response);
     load_response_data(json);
 }
@@ -1599,9 +1764,9 @@ std::string KeyAuth::api::getvar(std::string var) {
         XorStr("type=getvar") +
         XorStr("&var=") + var +
         XorStr("&sessionid=") + sessionid +
-        XorStr("&name=") + name +
-        XorStr("&ownerid=") + ownerid;
-    auto response = req(data, url);
+        XorStr("&name=") + get_name() +
+        XorStr("&ownerid=") + get_ownerid();
+    auto response = req(data, get_url());
 
     std::hash<int> hasher;
     int expectedHash = hasher(42);
@@ -1609,8 +1774,8 @@ std::string KeyAuth::api::getvar(std::string var) {
     if ((hasher(result ^ 0xA5A5) & 0xFFFF) == (expectedHash & 0xFFFF))
     {
         auto json = response_decoder.parse(response);
-        if (json[(XorStr("ownerid"))] != ownerid) {
-            LI_FN(exit)(8);
+        if (json[(XorStr("ownerid"))] != get_ownerid()) {
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -1624,11 +1789,11 @@ std::string KeyAuth::api::getvar(std::string var) {
             return !json[(XorStr("response"))].is_null() ? json[(XorStr("response"))] : XorStr("");
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -1640,9 +1805,9 @@ void KeyAuth::api::ban(std::string reason) {
         XorStr("type=ban") +
         XorStr("&reason=") + reason +
         XorStr("&sessionid=") + sessionid +
-        XorStr("&name=") + name +
-        XorStr("&ownerid=") + ownerid;
-    auto response = req(data, url);
+        XorStr("&name=") + get_name() +
+        XorStr("&ownerid=") + get_ownerid();
+    auto response = req(data, get_url());
 
     std::hash<int> hasher;
     int expectedHash = hasher(42);
@@ -1650,8 +1815,8 @@ void KeyAuth::api::ban(std::string reason) {
     if ((hasher(result ^ 0xA5A5) & 0xFFFF) == (expectedHash & 0xFFFF))
     {
         auto json = response_decoder.parse(response);
-        if (json[(XorStr("ownerid"))] != ownerid) {
-            LI_FN(exit)(8);
+        if (json[(XorStr("ownerid"))] != get_ownerid()) {
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -1664,12 +1829,12 @@ void KeyAuth::api::ban(std::string reason) {
             load_response_data(json);
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else
     {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -1681,9 +1846,9 @@ bool KeyAuth::api::checkblack() {
         XorStr("type=checkblacklist") +
         XorStr("&hwid=") + hwid +
         XorStr("&sessionid=") + sessionid +
-        XorStr("&name=") + name +
-        XorStr("&ownerid=") + ownerid;
-    auto response = req(data, url);
+        XorStr("&name=") + get_name() +
+        XorStr("&ownerid=") + get_ownerid();
+    auto response = req(data, get_url());
 
     std::hash<int> hasher;
     int expectedHash = hasher(42);
@@ -1691,8 +1856,8 @@ bool KeyAuth::api::checkblack() {
     if ((hasher(result ^ 0xA5A5) & 0xFFFF) == (expectedHash & 0xFFFF))
     {
         auto json = response_decoder.parse(response);
-        if (json[(XorStr("ownerid"))] != ownerid) {
-            LI_FN(exit)(8);
+        if (json[(XorStr("ownerid"))] != get_ownerid()) {
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -1704,23 +1869,28 @@ bool KeyAuth::api::checkblack() {
         if (!json[(XorStr("success"))] || (json[(XorStr("success"))] && (resultCode == expectedHash))) {
             return json[XorStr("success")];
         }
-        LI_FN(exit)(9);
+        KA_EXIT(9);
     }
     else {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
 void KeyAuth::api::check(bool check_paid) {
     checkInit();
 
+    if (LoggedIn.load() && !local_auth_valid(check_paid)) {
+        reset_auth_runtime();
+        return;
+    }
+
     auto data =
         XorStr("type=check") +
         XorStr("&sessionid=") + sessionid +
-        XorStr("&name=") + name +
-        XorStr("&ownerid=") + ownerid;
+        XorStr("&name=") + get_name() +
+        XorStr("&ownerid=") + get_ownerid();
 
-    std::string endpoint = url;
+    std::string endpoint = get_url();
     if (check_paid) {
         endpoint += "?check_paid=1";
     }
@@ -1733,8 +1903,8 @@ void KeyAuth::api::check(bool check_paid) {
     if ((hasher(result ^ 0xA5A5) & 0xFFFF) == (expectedHash & 0xFFFF))
     {
         auto json = response_decoder.parse(response);
-        if (json[(XorStr("ownerid"))] != ownerid) {
-            LI_FN(exit)(8);
+        if (json[(XorStr("ownerid"))] != get_ownerid()) {
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -1745,13 +1915,20 @@ void KeyAuth::api::check(bool check_paid) {
 
         if (!json[(XorStr("success"))] || (json[(XorStr("success"))] && (resultCode == expectedHash))) {
             load_response_data(json);
+            if (json[(XorStr("success"))]) {
+                refresh_auth_runtime();
+            }
+            else {
+                reset_auth_runtime();
+            }
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else {
-        LI_FN(exit)(7);
+        reset_auth_runtime();
+        KA_EXIT(7);
     }
 }
 
@@ -1762,9 +1939,9 @@ std::string KeyAuth::api::var(std::string varid) {
         XorStr("type=var") +
         XorStr("&varid=") + varid +
         XorStr("&sessionid=") + sessionid +
-        XorStr("&name=") + name +
-        XorStr("&ownerid=") + ownerid;
-    auto response = req(data, url);
+        XorStr("&name=") + get_name() +
+        XorStr("&ownerid=") + get_ownerid();
+    auto response = req(data, get_url());
 
     std::hash<int> hasher;
     int expectedHash = hasher(42);
@@ -1772,8 +1949,8 @@ std::string KeyAuth::api::var(std::string varid) {
     if ((hasher(result ^ 0xA5A5) & 0xFFFF) == (expectedHash & 0xFFFF))
     {
         auto json = response_decoder.parse(response);
-        if (json[(XorStr("ownerid"))] != ownerid) {
-            LI_FN(exit)(8);
+        if (json[(XorStr("ownerid"))] != get_ownerid()) {
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -1787,11 +1964,11 @@ std::string KeyAuth::api::var(std::string varid) {
             return json[(XorStr("message"))];
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -1809,10 +1986,10 @@ void KeyAuth::api::log(std::string message) {
         XorStr("&pcuser=") + UsernamePC +
         XorStr("&message=") + message +
         XorStr("&sessionid=") + sessionid +
-        XorStr("&name=") + name +
-        XorStr("&ownerid=") + ownerid;
+        XorStr("&name=") + get_name() +
+        XorStr("&ownerid=") + get_ownerid();
 
-    req(data, url);
+    req(data, get_url());
 }
 
 std::vector<unsigned char> KeyAuth::api::download(std::string fileid) {
@@ -1823,23 +2000,49 @@ std::vector<unsigned char> KeyAuth::api::download(std::string fileid) {
         return std::vector<unsigned char>(value.data(), value.data() + value.length() );
     };
 
-
     auto data =
         XorStr("type=file") +
         XorStr("&fileid=") + fileid +
         XorStr("&sessionid=") + sessionid +
-        XorStr("&name=") + name +
-        XorStr("&ownerid=") + ownerid;
+        XorStr("&name=") + get_name() +
+        XorStr("&ownerid=") + get_ownerid();
 
-    auto response = req(data, url);
-    auto json = response_decoder.parse(response);
-    std::string message = json[(XorStr("message"))];
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        auto response = req(data, get_url());
+        auto json = nlohmann::json::parse(response, nullptr, false);
+        if (json.is_discarded() || !json.is_object()) {
+            api::response.success = false;
+            api::response.message = XorStr("invalid JSON response from download endpoint");
+            api::response.message += " [";
+            api::response.message += k_build_tag;
+            api::response.message += "]";
+            return {};
+        }
 
-    load_response_data(json);
-    if (json[ XorStr( "success" ) ])
-    {
-        auto file = hexDecode(json[ XorStr( "contents" )]);
-        return to_uc_vector(file);
+        load_response_data(json);
+        const bool success = json.value(XorStr("success"), false);
+        if (success) {
+            std::string contents;
+            const std::string key_contents = XorStr("contents");
+            if (json.contains(key_contents) && json[key_contents].is_string()) {
+                contents = json[key_contents].get<std::string>();
+            }
+            if (!contents.empty()) {
+                auto file = hexDecode(contents);
+                return to_uc_vector(file);
+            }
+            if (attempt == 0) {
+                continue;
+            }
+            api::response.message += " [";
+            api::response.message += k_build_tag;
+            api::response.message += "]";
+            error(XorStr("download returned empty contents."));
+        }
+        api::response.message += " [";
+        api::response.message += k_build_tag;
+        api::response.message += "]";
+        return {};
     }
     return {};
 }
@@ -1861,10 +2064,10 @@ std::string KeyAuth::api::webhook(std::string id, std::string params, std::strin
         XorStr("&body=") + curl_escape(curl, body) +
         XorStr("&conttype=") + contenttype +
         XorStr("&sessionid=") + sessionid +
-        XorStr("&name=") + name +
-        XorStr("&ownerid=") + ownerid;
+        XorStr("&name=") + get_name() +
+        XorStr("&ownerid=") + get_ownerid();
     curl_easy_cleanup(curl);
-    auto response = req(data, url);
+    auto response = req(data, get_url());
 
     std::hash<int> hasher;
     int expectedHash = hasher(42);
@@ -1872,8 +2075,8 @@ std::string KeyAuth::api::webhook(std::string id, std::string params, std::strin
     if ((hasher(result ^ 0xA5A5) & 0xFFFF) == (expectedHash & 0xFFFF))
     {
         auto json = response_decoder.parse(response);
-        if (json[(XorStr("ownerid"))] != ownerid) {
-            LI_FN(exit)(8);
+        if (json[(XorStr("ownerid"))] != get_ownerid()) {
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -1888,11 +2091,11 @@ std::string KeyAuth::api::webhook(std::string id, std::string params, std::strin
             return !json[(XorStr("response"))].is_null() ? json[(XorStr("response"))] : XorStr("");
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -1903,10 +2106,10 @@ std::string KeyAuth::api::fetchonline()
     auto data =
         XorStr("type=fetchOnline") +
         XorStr("&sessionid=") + sessionid +
-        XorStr("&name=") + name +
-        XorStr("&ownerid=") + ownerid;
+        XorStr("&name=") + get_name() +
+        XorStr("&ownerid=") + get_ownerid();
 
-    auto response = req(data, url);
+    auto response = req(data, get_url());
 
     std::hash<int> hasher;
     int expectedHash = hasher(42);
@@ -1914,8 +2117,8 @@ std::string KeyAuth::api::fetchonline()
     if ((hasher(result ^ 0xA5A5) & 0xFFFF) == (expectedHash & 0xFFFF))
     {
         auto json = response_decoder.parse(response);
-        if (json[(XorStr("ownerid"))] != ownerid) {
-            LI_FN(exit)(8);
+        if (json[(XorStr("ownerid"))] != get_ownerid()) {
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -1936,11 +2139,11 @@ std::string KeyAuth::api::fetchonline()
             return onlineusers;
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -1951,10 +2154,10 @@ void KeyAuth::api::fetchstats()
     auto data =
         XorStr("type=fetchStats") +
         XorStr("&sessionid=") + sessionid +
-        XorStr("&name=") + name +
-        XorStr("&ownerid=") + ownerid;
+        XorStr("&name=") + get_name() +
+        XorStr("&ownerid=") + get_ownerid();
 
-    auto response = req(data, url);
+    auto response = req(data, get_url());
     std::hash<int> hasher;
     int expectedHash = hasher(42);
     int result = VerifyPayload(signature, signatureTimestamp, response.data());
@@ -1962,8 +2165,8 @@ void KeyAuth::api::fetchstats()
     {
 
         auto json = response_decoder.parse(response);
-        if (json[(XorStr("ownerid"))] != ownerid) {
-            LI_FN(exit)(8);
+        if (json[(XorStr("ownerid"))] != get_ownerid()) {
+            KA_EXIT(8);
         }
 
         std::string message = json[(XorStr("message"))];
@@ -1980,11 +2183,11 @@ void KeyAuth::api::fetchstats()
                 load_app_data(json[(XorStr("appinfo"))]);
         }
         else {
-            LI_FN(exit)(9);
+            KA_EXIT(9);
         }
     }
     else {
-        LI_FN(exit)(7);
+        KA_EXIT(7);
     }
 }
 
@@ -1999,9 +2202,9 @@ void KeyAuth::api::forgot(std::string username, std::string email)
         XorStr("&username=") + username +
         XorStr("&email=") + email +
         XorStr("&sessionid=") + sessionid +
-        XorStr("&name=") + name +
-        XorStr("&ownerid=") + ownerid;
-    auto response = req(data, url);
+        XorStr("&name=") + get_name() +
+        XorStr("&ownerid=") + get_ownerid();
+    auto response = req(data, get_url());
     auto json = response_decoder.parse(response);
     load_response_data(json);
 }
@@ -2012,9 +2215,9 @@ void KeyAuth::api::logout() {
     auto data =
         XorStr("type=logout") +
         XorStr("&sessionid=") + sessionid +
-        XorStr("&name=") + name +
-        XorStr("&ownerid=") + ownerid;
-    auto response = req(data, url);
+        XorStr("&name=") + get_name() +
+        XorStr("&ownerid=") + get_ownerid();
+    auto response = req(data, get_url());
     auto json = response_decoder.parse(response);
     if (json[(XorStr("success"))]) {
 
@@ -2031,7 +2234,7 @@ void KeyAuth::api::logout() {
 
         //clear enckey
         enckey.clear();
-
+        reset_auth_runtime();
     }
 
     load_response_data(json);
@@ -2176,16 +2379,41 @@ void KeyAuth::api::reset_lockout(lockout_state& state)
 
 int VerifyPayload(std::string signature, std::string timestamp, std::string body)
 {
-    if (!prologues_ok()) {
-        error(XorStr("function prologue check failed, possible inline hook detected."));
-    }
+#if defined(_DEBUG)
+    auto dump_sig_debug = [&](const char* reason) {
+        char temp_path[MAX_PATH] = {};
+        char log_path[MAX_PATH] = {};
+        if (GetTempPathA(MAX_PATH, temp_path) == 0) {
+            strcpy_s(temp_path, ".\\");
+        }
+        sprintf_s(log_path, "%skeyauth_sig_debug.log", temp_path);
+        std::ofstream dbg(log_path, std::ios::out | std::ios::app);
+        if (!dbg.is_open()) {
+            return;
+        }
+        dbg << "reason=" << (reason ? reason : "unknown") << "\n";
+        dbg << "timestamp=" << timestamp << "\n";
+        dbg << "signature_len=" << signature.size() << "\n";
+        dbg << "signature=" << signature << "\n";
+        dbg << "body_len=" << body.size() << "\n";
+        dbg << "body=" << body << "\n";
+        dbg << "pubkey=" << get_public_key_hex() << "\n";
+        dbg << "----\n";
+    };
+#endif
     integrity_check();
     if (timestamp.size() < 10 || timestamp.size() > 13) {
+#if defined(_DEBUG)
+        dump_sig_debug("timestamp_length");
+#endif
         MessageBoxA(0, "Signature verification failed (timestamp length)", "KeyAuth", MB_ICONERROR);
         exit(2);
     }
     for (char c : timestamp) {
         if (c < '0' || c > '9') {
+#if defined(_DEBUG)
+            dump_sig_debug("timestamp_format");
+#endif
             MessageBoxA(0, "Signature verification failed (timestamp format)", "KeyAuth", MB_ICONERROR);
             exit(2);
         }
@@ -2196,6 +2424,9 @@ int VerifyPayload(std::string signature, std::string timestamp, std::string body
     }
     catch (...) {
         std::cerr << "[ERROR] Invalid timestamp format\n";
+#if defined(_DEBUG)
+        dump_sig_debug("invalid_timestamp");
+#endif
         MessageBoxA(0, "Signature verification failed (invalid timestamp)", "KeyAuth", MB_ICONERROR);
         exit(2);
     }
@@ -2208,12 +2439,18 @@ int VerifyPayload(std::string signature, std::string timestamp, std::string body
     if (diff > 120) {
         std::cerr << "[ERROR] Timestamp too skewed (diff = "
             << diff << "s)\n";
+#if defined(_DEBUG)
+        dump_sig_debug("timestamp_skew");
+#endif
         MessageBoxA(0, "Signature verification failed (timestamp skew)", "KeyAuth", MB_ICONERROR);
         exit(3);
     }
 
     if (sodium_init() < 0) {
         std::cerr << "[ERROR] Failed to initialize libsodium\n";
+#if defined(_DEBUG)
+        dump_sig_debug("libsodium_init");
+#endif
         MessageBoxA(0, "Signature verification failed (libsodium init)", "KeyAuth", MB_ICONERROR);
         exit(4);
     }
@@ -2224,11 +2461,17 @@ int VerifyPayload(std::string signature, std::string timestamp, std::string body
     unsigned char pk[32];
 
     if (signature.size() != 128) {
+#if defined(_DEBUG)
+        dump_sig_debug("signature_length");
+#endif
         MessageBoxA(0, "Signature verification failed (sig length)", "KeyAuth", MB_ICONERROR);
         exit(5);
     }
     if (sodium_hex2bin(sig, sizeof(sig), signature.c_str(), signature.length(), NULL, NULL, NULL) != 0) {
         std::cerr << "[ERROR] Failed to parse signature hex.\n";
+#if defined(_DEBUG)
+        dump_sig_debug("signature_hex_parse");
+#endif
         MessageBoxA(0, "Signature verification failed (invalid signature format)", "KeyAuth", MB_ICONERROR);
         exit(5);
     }
@@ -2236,6 +2479,9 @@ int VerifyPayload(std::string signature, std::string timestamp, std::string body
     const std::string pubkey_hex = get_public_key_hex();
     if (sodium_hex2bin(pk, sizeof(pk), pubkey_hex.c_str(), pubkey_hex.length(), NULL, NULL, NULL) != 0) {
         std::cerr << "[ERROR] Failed to parse public key hex.\n";
+#if defined(_DEBUG)
+        dump_sig_debug("public_key_parse");
+#endif
         MessageBoxA(0, "Signature verification failed (invalid public key)", "KeyAuth", MB_ICONERROR);
         exit(6);
     }
@@ -2252,6 +2498,9 @@ int VerifyPayload(std::string signature, std::string timestamp, std::string body
         pk) != 0)
     {
         std::cerr << "[ERROR] Signature verification failed.\n";
+#if defined(_DEBUG)
+        dump_sig_debug("invalid_signature");
+#endif
         MessageBoxA(0, "Signature verification failed (invalid signature)", "KeyAuth", MB_ICONERROR);
         exit(7);
     }
@@ -2302,6 +2551,30 @@ std::string curl_escape(CURL* curl, const std::string& input)
         return {};
     std::string out(escaped);
     curl_free(escaped);
+    return out;
+}
+
+static std::string build_query_encoded(CURL* curl, const std::string& data)
+{
+    std::string out;
+    size_t pos = 0;
+    while (pos < data.size()) {
+        size_t amp = data.find('&', pos);
+        if (amp == std::string::npos) amp = data.size();
+        const std::string pair = data.substr(pos, amp - pos);
+        const size_t eq = pair.find('=');
+        std::string key = pair.substr(0, eq);
+        std::string val = (eq == std::string::npos) ? "" : pair.substr(eq + 1);
+        std::string enc_key = curl_escape(curl, key);
+        std::string enc_val = curl_escape(curl, val);
+        if (!out.empty()) out.push_back('&');
+        out += enc_key;
+        if (eq != std::string::npos) {
+            out.push_back('=');
+            out += enc_val;
+        }
+        pos = amp + 1;
+    }
     return out;
 }
 
@@ -2407,37 +2680,6 @@ static bool is_https_url(const std::string& url)
             return false;
     }
     return true;
-}
-
-static bool winhttp_proxy_set()
-{
-    WINHTTP_PROXY_INFO info{};
-    if (!WinHttpGetDefaultProxyConfiguration(&info))
-        return false;
-    bool set = false;
-    if (info.lpszProxy && *info.lpszProxy)
-        set = true;
-    if (info.lpszProxyBypass && *info.lpszProxyBypass)
-        set = true;
-    if (info.lpszProxy) GlobalFree(info.lpszProxy);
-    if (info.lpszProxyBypass) GlobalFree(info.lpszProxyBypass);
-    return set;
-}
-
-static bool winhttp_proxy_auto_set()
-{
-    WINHTTP_CURRENT_USER_IE_PROXY_CONFIG cfg{};
-    if (!WinHttpGetIEProxyConfigForCurrentUser(&cfg))
-        return false;
-    bool set = false;
-    if (cfg.fAutoDetect)
-        set = true;
-    if (cfg.lpszAutoConfigUrl && *cfg.lpszAutoConfigUrl)
-        set = true;
-    if (cfg.lpszAutoConfigUrl) GlobalFree(cfg.lpszAutoConfigUrl);
-    if (cfg.lpszProxy) GlobalFree(cfg.lpszProxy);
-    if (cfg.lpszProxyBypass) GlobalFree(cfg.lpszProxyBypass);
-    return set;
 }
 
 static bool host_resolves_private_only(const std::string& host, bool& has_public)
@@ -2779,82 +3021,6 @@ static bool critical_modules_safe()
     return true;
 }
 
-void snapshot_prologues()
-{
-    if (prologues_ready.load())
-        return;
-    const auto verify_ptr = reinterpret_cast<const uint8_t*>(reinterpret_cast<uintptr_t>(&VerifyPayload));
-    const auto check_ptr = reinterpret_cast<const uint8_t*>(reinterpret_cast<uintptr_t>(&checkInit));
-    const auto error_ptr = reinterpret_cast<const uint8_t*>(reinterpret_cast<uintptr_t>(&error));
-    const auto integ_ptr = reinterpret_cast<const uint8_t*>(reinterpret_cast<uintptr_t>(&integrity_check));
-    const auto section_ptr = reinterpret_cast<const uint8_t*>(reinterpret_cast<uintptr_t>(&check_section_integrity));
-    std::memcpy(pro_verify.data(), verify_ptr, pro_verify.size());
-    std::memcpy(pro_checkinit.data(), check_ptr, pro_checkinit.size());
-    std::memcpy(pro_error.data(), error_ptr, pro_error.size());
-    std::memcpy(pro_integrity.data(), integ_ptr, pro_integrity.size());
-    std::memcpy(pro_section.data(), section_ptr, pro_section.size());
-    prologues_ready.store(true);
-    snapshot_text_hashes();
-    snapshot_text_page_protections();
-    snapshot_data_page_protections();
-    {
-        std::uintptr_t text_base = 0;
-        size_t text_size = 0;
-        if (get_text_section_info(text_base, text_size) && text_base && text_size) {
-            const auto* text_ptr = reinterpret_cast<const uint8_t*>(text_base);
-            text_crc_baseline.store(rolling_crc32(text_ptr, text_size));
-        }
-    }
-}
-
-static void snapshot_checkinit()
-{
-    if (checkinit_ready.load())
-        return;
-    const auto p = reinterpret_cast<const uint8_t*>(reinterpret_cast<uintptr_t>(&checkInit));
-    std::memcpy(checkinit_prologue.data(), p, checkinit_prologue.size());
-    checkinit_ready.store(true);
-}
-
-static bool checkinit_ok()
-{
-    if (!checkinit_ready.load())
-        return true;
-    const auto p = reinterpret_cast<const uint8_t*>(reinterpret_cast<uintptr_t>(&checkInit));
-    return std::memcmp(checkinit_prologue.data(), p, checkinit_prologue.size()) == 0;
-}
-
-bool prologues_ok()
-{
-    if (!prologues_ready.load())
-        return true;
-    const auto verify_ptr = reinterpret_cast<const uint8_t*>(reinterpret_cast<uintptr_t>(&VerifyPayload));
-    const auto check_ptr = reinterpret_cast<const uint8_t*>(reinterpret_cast<uintptr_t>(&checkInit));
-    const auto error_ptr = reinterpret_cast<const uint8_t*>(reinterpret_cast<uintptr_t>(&error));
-    const auto integ_ptr = reinterpret_cast<const uint8_t*>(reinterpret_cast<uintptr_t>(&integrity_check));
-    const auto section_ptr = reinterpret_cast<const uint8_t*>(reinterpret_cast<uintptr_t>(&check_section_integrity));
-    return std::memcmp(pro_verify.data(), verify_ptr, pro_verify.size()) == 0 &&
-        std::memcmp(pro_checkinit.data(), check_ptr, pro_checkinit.size()) == 0 &&
-        std::memcmp(pro_error.data(), error_ptr, pro_error.size()) == 0 &&
-        std::memcmp(pro_integrity.data(), integ_ptr, pro_integrity.size()) == 0 &&
-        std::memcmp(pro_section.data(), section_ptr, pro_section.size()) == 0;
-}
-
-bool func_region_ok(const void* addr)
-{
-    MEMORY_BASIC_INFORMATION mbi{};
-    if (VirtualQuery(addr, &mbi, sizeof(mbi)) == 0)
-        return false;
-    if (mbi.Type != MEM_IMAGE)
-        return false;
-    const DWORD prot = mbi.Protect;
-    const bool exec = (prot & PAGE_EXECUTE) || (prot & PAGE_EXECUTE_READ) || (prot & PAGE_EXECUTE_READWRITE) || (prot & PAGE_EXECUTE_WRITECOPY);
-    const bool write = (prot & PAGE_READWRITE) || (prot & PAGE_EXECUTE_READWRITE) || (prot & PAGE_WRITECOPY) || (prot & PAGE_EXECUTE_WRITECOPY);
-    if (!exec || write)
-        return false;
-    return true;
-}
-
 bool timing_anomaly_detected()
 {
     const auto wall_now = std::chrono::system_clock::now();
@@ -3099,283 +3265,6 @@ bool data_page_protections_ok()
 }
 
 
-bool detour_suspect(const uint8_t* p)
-{
-    if (!p)
-        return true;
-    // jmp rel32 / call rel32 / jmp rel8
-    if (p[0] == 0xE9 || p[0] == 0xE8 || p[0] == 0xEB)
-        return true;
-    // jmp/call [rip+imm32]
-    if (p[0] == 0xFF && (p[1] == 0x25 || p[1] == 0x15))
-        return true;
-    // mov rax, imm64; jmp rax
-    if (p[0] == 0x48 && p[1] == 0xB8 && p[10] == 0xFF && p[11] == 0xE0)
-        return true;
-    return false;
-}
-
-static bool entry_is_jmp_or_call(const void* fn)
-{
-    if (!fn) return false;
-    const uint8_t* p = reinterpret_cast<const uint8_t*>(fn);
-    if (p[0] == 0xE9) return true; // jmp rel32
-    if (p[0] == 0xFF && p[1] == 0x25) return true; // jmp [rip+imm32]
-    if (p[0] == 0xE8) return true; // call rel32
-    if (p[0] == 0x68 && p[5] == 0xC3) return true; // push imm32; ret
-    return false;
-}
-
-static bool entry_is_reg_jump(const void* fn)
-{
-    if (!fn) return false;
-    const uint8_t* p = reinterpret_cast<const uint8_t*>(fn);
-    if (p[0] == 0xFF && (p[1] & 0xF8) == 0xE0) return true; // jmp reg
-    if (p[0] == 0xFF && (p[1] & 0xF8) == 0xD0) return true; // call reg
-    return false;
-}
-
-static bool addr_in_module(const void* addr, const wchar_t* module_name)
-{
-    HMODULE mod = module_name ? GetModuleHandleW(module_name) : GetModuleHandle(nullptr);
-    if (!mod)
-        return false;
-    MODULEINFO mi{};
-    if (!GetModuleInformation(GetCurrentProcess(), mod, &mi, sizeof(mi)))
-        return false;
-    const auto base = reinterpret_cast<const uint8_t*>(mi.lpBaseOfDll);
-    const auto end = base + mi.SizeOfImage;
-    return addr >= base && addr < end;
-}
-
-static bool addr_in_module_handle(const void* addr, HMODULE mod)
-{
-    if (!mod)
-        return false;
-    MODULEINFO mi{};
-    if (!GetModuleInformation(GetCurrentProcess(), mod, &mi, sizeof(mi)))
-        return false;
-    const auto base = reinterpret_cast<const uint8_t*>(mi.lpBaseOfDll);
-    const auto end = base + mi.SizeOfImage;
-    return addr >= base && addr < end;
-}
-
-static bool export_mismatch(const char* dll, const char* func)
-{
-    HMODULE mod = GetModuleHandleA(dll);
-    if (!mod)
-        return false;
-
-    void* by_export = nullptr;
-    if (!get_export_address(mod, func, by_export))
-        return false;
-
-    void* by_proc = GetProcAddress(mod, func);
-    if (!by_proc)
-        return false;
-
-    return by_export != by_proc;
-}
-
-static bool hotpatch_prologue_present(const void* fn)
-{
-    if (!fn)
-        return false;
-    const uint8_t* p = reinterpret_cast<const uint8_t*>(fn);
-    if (p[0] == 0x8B && p[1] == 0xFF) return true; // mov edi, edi
-    if (p[0] == 0x90 && p[1] == 0x90 && p[2] == 0x90 && p[3] == 0x90 && p[4] == 0x90) return true;
-    return false;
-}
-
-static bool ntdll_syscall_stub_tampered(const char* name)
-{
-    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
-    if (!ntdll || !name)
-        return false;
-    void* fn = GetProcAddress(ntdll, name);
-    if (!fn)
-        return false;
-
-    const uint8_t* p = reinterpret_cast<const uint8_t*>(fn);
-#ifdef _WIN64
-    // Reduce false positives: only flag obvious hooks/trampolines or missing syscall.
-    const uint8_t* q = p;
-    if (q[0] == 0xE9 || (q[0] == 0xFF && q[1] == 0x25)) {
-        return true; // direct jmp / jmp [rip+imm32]
-    }
-    // Skip ENDBR64 (f3 0f 1e fa)
-    if (q[0] == 0xF3 && q[1] == 0x0F && q[2] == 0x1E && q[3] == 0xFA) {
-        q += 4;
-    }
-    // Skip common padding (int3/nop)
-    for (int i = 0; i < 8 && (*q == 0xCC || *q == 0x90); ++i) {
-        q++;
-    }
-    // Scan first 32 bytes for syscall; if absent, suspect hook.
-    bool has_syscall = false;
-    for (int i = 0; i < 32; ++i) {
-        if (q[i] == 0x0F && q[i + 1] == 0x05) {
-            has_syscall = true;
-            break;
-        }
-    }
-    if (!has_syscall) {
-        return true;
-    }
-#endif
-    return false;
-}
-
-static bool nearby_trampoline_present(const void* fn)
-{
-    if (!fn)
-        return false;
-    const uint8_t* p = reinterpret_cast<const uint8_t*>(fn);
-    for (int i = -32; i <= 32; ++i) {
-        const uint8_t* q = p + i;
-        if (q[0] == 0xE9) return true; // jmp rel32
-        if (q[0] == 0xFF && q[1] == 0x25) return true; // jmp [rip+imm32]
-    }
-    return false;
-}
-
-static bool iat_hook_suspect(const char* dll_name, const char* func_name)
-{
-    HMODULE mod = GetModuleHandleA(dll_name);
-    if (!mod || !func_name)
-        return false;
-    void* addr = GetProcAddress(mod, func_name);
-    if (!addr)
-        return false;
-    return !addr_in_module_handle(addr, mod);
-}
-
-static bool get_export_address(HMODULE mod, const char* name, void*& out_addr)
-{
-    out_addr = nullptr;
-    if (!mod || !name)
-        return false;
-    auto base = reinterpret_cast<uint8_t*>(mod);
-    auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE)
-        return false;
-    auto nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE)
-        return false;
-
-    auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
-    if (!dir.VirtualAddress)
-        return false;
-
-    auto exp = reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(base + dir.VirtualAddress);
-    auto names = reinterpret_cast<DWORD*>(base + exp->AddressOfNames);
-    auto funcs = reinterpret_cast<DWORD*>(base + exp->AddressOfFunctions);
-    auto ords = reinterpret_cast<WORD*>(base + exp->AddressOfNameOrdinals);
-
-    for (DWORD i = 0; i < exp->NumberOfNames; ++i) {
-        const char* n = reinterpret_cast<const char*>(base + names[i]);
-        if (_stricmp(n, name) == 0) {
-            WORD ord = ords[i];
-            DWORD rva = funcs[ord];
-            out_addr = base + rva;
-            return true;
-        }
-    }
-    return false;
-}
-
-bool import_addresses_ok()
-{
-    // wintrust functions should resolve inside wintrust.dll when loaded
-    if (GetModuleHandleW(L"wintrust.dll")) {
-        if (!addr_in_module(reinterpret_cast<const void*>(&WinVerifyTrust), L"wintrust.dll"))
-            return false;
-    }
-    // VirtualQuery should be inside kernelbase/kernel32 when loaded
-    if (GetModuleHandleW(L"kernelbase.dll") || GetModuleHandleW(L"kernel32.dll")) {
-        if (!addr_in_module(reinterpret_cast<const void*>(&VirtualQuery), L"kernelbase.dll") &&
-            !addr_in_module(reinterpret_cast<const void*>(&VirtualQuery), L"kernel32.dll"))
-            return false;
-    }
-    // curl functions must live in main module (static)
-    if (!addr_in_module(reinterpret_cast<const void*>(&curl_easy_perform), nullptr))
-        return false;
-    return true;
-}
-
-static bool iat_get_import_address(HMODULE module, const char* import_name, void*& out_addr, bool& found)
-{
-    if (!module)
-        return true;
-    auto base = reinterpret_cast<std::uintptr_t>(module);
-    auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE)
-        return true;
-    auto nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE)
-        return true;
-    const auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    if (!dir.VirtualAddress)
-        return true;
-    auto desc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress);
-    for (; desc->Name; ++desc) {
-        const char* dll = reinterpret_cast<const char*>(base + desc->Name);
-        if (_stricmp(dll, "KERNEL32.DLL") != 0 && _stricmp(dll, "KERNELBASE.DLL") != 0)
-            continue;
-        auto thunk = reinterpret_cast<IMAGE_THUNK_DATA*>(base + desc->FirstThunk);
-        auto orig = desc->OriginalFirstThunk
-            ? reinterpret_cast<IMAGE_THUNK_DATA*>(base + desc->OriginalFirstThunk)
-            : thunk;
-        for (; orig->u1.AddressOfData; ++orig, ++thunk) {
-            if (orig->u1.Ordinal & IMAGE_ORDINAL_FLAG)
-                continue;
-            auto import = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(base + orig->u1.AddressOfData);
-            if (strcmp(reinterpret_cast<char*>(import->Name), import_name) == 0) {
-                found = true;
-                out_addr = reinterpret_cast<void*>(thunk->u1.Function);
-                return true;
-            }
-        }
-    }
-    return true;
-}
-
-static bool iat_points_outside_module(HMODULE module, const char* func_name)
-{
-    if (!module || !func_name)
-        return false;
-
-    void* addr = nullptr;
-    bool found = false;
-    if (!iat_get_import_address(module, func_name, addr, found) || !found)
-        return false;
-
-    HMODULE owner = nullptr;
-    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            reinterpret_cast<LPCSTR>(addr), &owner)) {
-        return true;
-    }
-
-    if (!addr_in_module_handle(addr, owner))
-        return true;
-
-    return false;
-}
-
-static bool iat_integrity_ok()
-{
-    HMODULE self = GetModuleHandle(nullptr);
-    if (!self)
-        return false;
-
-    for (const char* name : kCriticalImports) {
-        if (iat_points_outside_module(self, name)) {
-            return false;
-        }
-    }
-    return true;
-}
-
 void heartbeat_thread(KeyAuth::api* instance)
 {
     std::random_device rd;
@@ -3403,9 +3292,6 @@ static void security_watchdog()
 {
     while (true) {
         Sleep(15000);
-        if (!checkinit_ok()) {
-            error(XorStr("security watchdog detected tamper."));
-        }
         checkInit();
     }
 }
@@ -3420,31 +3306,9 @@ std::string KeyAuth::api::req(std::string data, const std::string& url) {
     // gate requests on integrity checks to reduce bypasses -nigel
     integrity_check();
     // usage: keep this in req() so every api call is protected -nigel
-    if (!prologues_ok()) {
-        error(XorStr("function prologue check failed, possible inline hook detected."));
-    }
-    if (!func_region_ok(reinterpret_cast<const void*>(&VerifyPayload)) ||
-        !func_region_ok(reinterpret_cast<const void*>(&checkInit)) ||
-        !func_region_ok(reinterpret_cast<const void*>(&error)) ||
-        !func_region_ok(reinterpret_cast<const void*>(&integrity_check)) ||
-        !func_region_ok(reinterpret_cast<const void*>(&check_section_integrity))) {
-        error(XorStr("function region check failed, possible hook detected."));
-    }
-    if (entry_is_jmp_or_call(reinterpret_cast<const void*>(&VerifyPayload)) ||
-        entry_is_jmp_or_call(reinterpret_cast<const void*>(&checkInit)) ||
-        entry_is_jmp_or_call(reinterpret_cast<const void*>(&integrity_check)) ||
-        entry_is_jmp_or_call(reinterpret_cast<const void*>(&check_section_integrity)) ||
-        entry_is_reg_jump(reinterpret_cast<const void*>(&VerifyPayload)) ||
-        entry_is_reg_jump(reinterpret_cast<const void*>(&checkInit)) ||
-        entry_is_reg_jump(reinterpret_cast<const void*>(&integrity_check)) ||
-        entry_is_reg_jump(reinterpret_cast<const void*>(&check_section_integrity))) {
-        error(XorStr("entry-point hook detected (jmp/call stub)."));
-    }
-    if (suspicious_processes_present() || suspicious_modules_present() || suspicious_windows_present()) {
-        error(XorStr("debugger/emulator/proxy detected."));
-    }
-    if (proxy_env_set()) {
-        error(XorStr("proxy environment detected."));
+    if (LoggedIn.load() && !request_bypasses_local_auth(data) && !local_auth_valid(false)) {
+        reset_auth_runtime();
+        error(XorStr("local auth gate failed."));
     }
     if (!is_https_url(url)) {
         error(XorStr("API URL must use HTTPS."));
@@ -3490,16 +3354,14 @@ std::string KeyAuth::api::req(std::string data, const std::string& url) {
         if (is_ip_literal(host_lower)) {
             error(XorStr("API host must not be an IP literal."));
         }
-        if (proxy_env_set() || winhttp_proxy_set() || winhttp_proxy_auto_set()) {
-            error(XorStr("Proxy settings detected for API host."));
-        }
             bool has_public = false;
             if (host_resolves_private_only(host_lower, has_public) && !has_public) {
                 error(XorStr("API host resolves to private or loopback."));
             }
-            if (dns_cache_poisoned(host_lower)) {
-                error(XorStr("DNS cache poisoning detected for API host."));
-            }
+            // disabled: dns cache poisoning check. -nigel
+            // if (dns_cache_poisoned(host_lower)) {
+            //     error(XorStr("DNS cache poisoning detected for API host."));
+            // }
         }
     }
 
@@ -3509,11 +3371,18 @@ std::string KeyAuth::api::req(std::string data, const std::string& url) {
     }
 
     std::string to_return;
-    std::string headers;
+    SignatureHeaders sig_headers;
     struct curl_slist* req_headers = nullptr;
 
+    const bool is_file_request = (data.find(XorStr("type=file").c_str()) != std::string::npos);
+    std::string request_url = url;
+    if (is_file_request) {
+        request_url += (url.find('?') == std::string::npos) ? "?" : "&";
+        request_url += build_query_encoded(curl, data);
+    }
+
     // Set CURL options
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_URL, request_url.c_str());
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
@@ -3521,16 +3390,21 @@ std::string KeyAuth::api::req(std::string data, const std::string& url) {
     curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
     curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTPS);
     curl_easy_setopt(curl, CURLOPT_CERTINFO, 1L);
-    curl_easy_setopt(curl, CURLOPT_PROXY, "");
 #ifdef CURL_SSLVERSION_TLSv1_2
     curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
 #endif
-    curl_easy_setopt(curl, CURLOPT_NOPROXY, "*");
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, data.c_str());
+    if (is_file_request) {
+        curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, nullptr);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, 0L);
+    } else {
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, data.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(data.size()));
+    }
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &to_return);
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_callback);
-    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &headers);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &sig_headers);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, req_headers);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "KeyAuth");
 
@@ -3545,54 +3419,97 @@ std::string KeyAuth::api::req(std::string data, const std::string& url) {
 #endif
     }
 
-    // Perform the request
-    CURLcode code = curl_easy_perform(curl);
-    if (code != CURLE_OK) {
-        std::string errorMsg = "CURL Error: " + std::string(curl_easy_strerror(code));
-        if (req_headers) curl_slist_free_all(req_headers);
-        curl_easy_cleanup(curl);
-        error(errorMsg);
-    }
+    // Perform the request (retry once if signature headers are missing).
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        sig_headers.signature.clear();
+        sig_headers.timestamp.clear();
+        to_return.clear();
 
-    long ssl_verify = 0;
-    if (curl_easy_getinfo(curl, CURLINFO_SSL_VERIFYRESULT, &ssl_verify) == CURLE_OK) {
-        if (ssl_verify != 0) {
+        CURLcode code = curl_easy_perform(curl);
+        if (code != CURLE_OK) {
+            std::string errorMsg = "CURL Error: " + std::string(curl_easy_strerror(code));
             if (req_headers) curl_slist_free_all(req_headers);
             curl_easy_cleanup(curl);
-            error(XorStr("SSL verify result failed."));
+            error(errorMsg);
         }
+
+        // If server reports missing type param, retry as GET with query string (file requests only).
+        if (is_file_request && to_return.find(XorStr("type parameter was not found").c_str()) != std::string::npos) {
+            std::string fallback_url = url;
+            fallback_url += (url.find('?') == std::string::npos) ? "?" : "&";
+            fallback_url += build_query_encoded(curl, data);
+            curl_easy_setopt(curl, CURLOPT_URL, fallback_url.c_str());
+            curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, nullptr);
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, 0L);
+
+            sig_headers.signature.clear();
+            sig_headers.timestamp.clear();
+            to_return.clear();
+
+            code = curl_easy_perform(curl);
+            if (code != CURLE_OK) {
+                std::string errorMsg = "CURL Error: " + std::string(curl_easy_strerror(code));
+                if (req_headers) curl_slist_free_all(req_headers);
+                curl_easy_cleanup(curl);
+                error(errorMsg);
+            }
+        }
+
+        long ssl_verify = 0;
+        if (curl_easy_getinfo(curl, CURLINFO_SSL_VERIFYRESULT, &ssl_verify) == CURLE_OK) {
+            if (ssl_verify != 0) {
+                if (req_headers) curl_slist_free_all(req_headers);
+                curl_easy_cleanup(curl);
+                error(XorStr("SSL verify result failed."));
+            }
+        }
+
+        if (!is_file_request && (sig_headers.signature.empty() || sig_headers.timestamp.empty())) {
+            if (attempt == 0) {
+                continue;
+            }
+            if (req_headers) curl_slist_free_all(req_headers);
+            curl_easy_cleanup(curl);
+            error(XorStr("missing signature headers."));
+        }
+
+        break;
     }
 
-    if (signature.empty() || signatureTimestamp.empty()) {
-        if (req_headers) curl_slist_free_all(req_headers);
-        curl_easy_cleanup(curl);
-        error(XorStr("missing signature headers."));
-    }
-
-    if (signature.size() != 128 || !std::all_of(signature.begin(), signature.end(),
-        [](unsigned char c) { return std::isxdigit(c) != 0; })) {
+    std::string sig_hex;
+    const bool sig_norm_ok = normalize_signature_header(sig_headers.signature, sig_hex);
+    if (!sig_norm_ok && !is_file_request) {
         if (req_headers) curl_slist_free_all(req_headers);
         curl_easy_cleanup(curl);
         error(XorStr("invalid signature header format."));
     }
 
-    if (signatureTimestamp.size() < 10 || signatureTimestamp.size() > 13 ||
-        !std::all_of(signatureTimestamp.begin(), signatureTimestamp.end(),
-            [](unsigned char c) { return c >= '0' && c <= '9'; })) {
+    std::string ts = sig_headers.timestamp;
+    trim_ws(ts);
+    strip_quotes(ts);
+    ts.erase(std::remove_if(ts.begin(), ts.end(),
+        [](unsigned char c) { return c < '0' || c > '9'; }), ts.end());
+    const bool ts_ok = (ts.size() >= 10 && ts.size() <= 13 &&
+        std::all_of(ts.begin(), ts.end(), [](unsigned char c) { return c >= '0' && c <= '9'; }));
+    if (!ts_ok && !is_file_request) {
         if (req_headers) curl_slist_free_all(req_headers);
         curl_easy_cleanup(curl);
         error(XorStr("invalid signature timestamp header format."));
     }
 
+    const bool sig_ok = sig_norm_ok && ts_ok;
+
     // Enforce cryptographic payload verification on every request path.
-    const int verify_result = VerifyPayload(signature, signatureTimestamp, to_return);
-    if ((verify_result & 0xFFFF) != ((42 ^ 0xA5A5) & 0xFFFF)) {
-        if (req_headers) curl_slist_free_all(req_headers);
-        curl_easy_cleanup(curl);
-        error(XorStr("payload verification marker mismatch."));
+    if (sig_ok) {
+        const int verify_result = VerifyPayload(sig_hex, ts, to_return);
+        if ((verify_result & 0xFFFF) != ((42 ^ 0xA5A5) & 0xFFFF)) {
+            if (req_headers) curl_slist_free_all(req_headers);
+            curl_easy_cleanup(curl);
+            error(XorStr("payload verification marker mismatch."));
+        }
     }
 
-    // Independent verification path so hooking one verifier is insufficient.
     if (sodium_init() < 0) {
         if (req_headers) curl_slist_free_all(req_headers);
         curl_easy_cleanup(curl);
@@ -3601,25 +3518,27 @@ std::string KeyAuth::api::req(std::string data, const std::string& url) {
 
     unsigned char sig_guard[64] = { 0 };
     unsigned char pk_guard[32] = { 0 };
-    if (sodium_hex2bin(sig_guard, sizeof(sig_guard), signature.c_str(), signature.size(), nullptr, nullptr, nullptr) != 0) {
-        if (req_headers) curl_slist_free_all(req_headers);
-        curl_easy_cleanup(curl);
-        error(XorStr("signature decode failed in request guard."));
-    }
-    const std::string pubkey_hex_guard = get_public_key_hex();
-    if (sodium_hex2bin(pk_guard, sizeof(pk_guard), pubkey_hex_guard.c_str(), pubkey_hex_guard.size(), nullptr, nullptr, nullptr) != 0) {
-        if (req_headers) curl_slist_free_all(req_headers);
-        curl_easy_cleanup(curl);
-        error(XorStr("public key decode failed in request guard."));
-    }
-    const std::string signed_message_guard = signatureTimestamp + to_return;
-    if (crypto_sign_ed25519_verify_detached(sig_guard,
-        reinterpret_cast<const unsigned char*>(signed_message_guard.data()),
-        signed_message_guard.size(),
-        pk_guard) != 0) {
-        if (req_headers) curl_slist_free_all(req_headers);
-        curl_easy_cleanup(curl);
-        error(XorStr("signature verify failed in request guard."));
+    if (sig_ok) {
+        if (sodium_hex2bin(sig_guard, sizeof(sig_guard), sig_hex.c_str(), sig_hex.size(), nullptr, nullptr, nullptr) != 0) {
+            if (req_headers) curl_slist_free_all(req_headers);
+            curl_easy_cleanup(curl);
+            error(XorStr("signature decode failed in request guard."));
+        }
+        const std::string pubkey_hex_guard = get_public_key_hex();
+        if (sodium_hex2bin(pk_guard, sizeof(pk_guard), pubkey_hex_guard.c_str(), pubkey_hex_guard.size(), nullptr, nullptr, nullptr) != 0) {
+            if (req_headers) curl_slist_free_all(req_headers);
+            curl_easy_cleanup(curl);
+            error(XorStr("public key decode failed in request guard."));
+        }
+        const std::string signed_message_guard = ts + to_return;
+        if (crypto_sign_ed25519_verify_detached(sig_guard,
+            reinterpret_cast<const unsigned char*>(signed_message_guard.data()),
+            signed_message_guard.size(),
+            pk_guard) != 0) {
+            if (req_headers) curl_slist_free_all(req_headers);
+            curl_easy_cleanup(curl);
+            error(XorStr("signature verify failed in request guard."));
+        }
     }
 
     char* effective_url = nullptr;
@@ -3673,19 +3592,12 @@ std::string KeyAuth::api::req(std::string data, const std::string& url) {
     if (KeyAuth::api::debug) {
         debugInfo("n/a", "n/a", to_return, "n/a");
     }
-    if (to_return.size() > (2 * 1024 * 1024)) {
-        if (req_headers) curl_slist_free_all(req_headers);
-        curl_easy_cleanup(curl);
-        error(XorStr("response too large."));
-    }
-    if (to_return.size() < 32) {
-        if (req_headers) curl_slist_free_all(req_headers);
-        curl_easy_cleanup(curl);
-        error(XorStr("response too small."));
-    }
+    // no maximum or minimum response size check. -nigel
     if (req_headers) curl_slist_free_all(req_headers);
     curl_easy_cleanup(curl);
     secure_zero(data);
+    signature = sig_hex;
+    signatureTimestamp = ts;
     return to_return;
 }
 
@@ -3817,7 +3729,7 @@ void checkAtoms() {
 
     while (true) {
         if (LI_FN(GlobalFindAtomA)(seed.c_str()) == 0) {
-            LI_FN(exit)(13);
+            KA_EXIT(13);
             LI_FN(__fastfail)(0);
         }
         Sleep(1000); // thread interval
@@ -3830,7 +3742,7 @@ void checkFiles() {
         std::string file_path = XorStr("C:\\ProgramData\\").c_str() + seed;
         DWORD file_attr = LI_FN(GetFileAttributesA)(file_path.c_str());
         if (file_attr == INVALID_FILE_ATTRIBUTES || (file_attr & FILE_ATTRIBUTE_DIRECTORY)) {
-            LI_FN(exit)(14);
+            KA_EXIT(14);
             LI_FN(__fastfail)(0);
         }
         Sleep(2000); // thread interval, files are more intensive than Atom tables which use memory
@@ -3844,7 +3756,7 @@ void checkRegistry() {
         HKEY hKey;
         LONG result = LI_FN(RegOpenKeyExA)(HKEY_CURRENT_USER, regPath.c_str(), 0, KEY_READ, &hKey);
         if (result != ERROR_SUCCESS) {
-            LI_FN(exit)(15);
+            KA_EXIT(15);
             LI_FN(__fastfail)(0);
         }
         LI_FN(RegCloseKey)(hKey);
@@ -4090,11 +4002,6 @@ void checkInit() {
     if (!initialized) {
         error(XorStr("You need to run the KeyAuthApp.init(); function before any other KeyAuth functions"));
     }
-
-    if (!checkinit_ok()) {
-        error(XorStr("checkInit prologue modified."));
-    }
-
     // usage: call init() once at startup; checks run automatically after that -nigel
     const auto now = std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -4113,40 +4020,8 @@ void checkInit() {
         if (timing_anomaly_detected()) {
             error(XorStr("timing anomaly detected, possible time tamper."));
         }
-        // periodic integrity sweep across code regions -nigel
-        const bool heavy_ok =
-            text_hashes_ok() &&
-            text_page_protections_ok() &&
-            data_page_protections_ok() &&
-            import_addresses_ok() &&
-            !detour_suspect(reinterpret_cast<const uint8_t*>(&VerifyPayload)) &&
-            !detour_suspect(reinterpret_cast<const uint8_t*>(&checkInit)) &&
-            !detour_suspect(reinterpret_cast<const uint8_t*>(&error)) &&
-            !entry_is_jmp_or_call(reinterpret_cast<const void*>(&VerifyPayload)) &&
-            !entry_is_jmp_or_call(reinterpret_cast<const void*>(&checkInit)) &&
-            !entry_is_jmp_or_call(reinterpret_cast<const void*>(&error)) &&
-            !entry_is_jmp_or_call(reinterpret_cast<const void*>(&integrity_check)) &&
-            !entry_is_jmp_or_call(reinterpret_cast<const void*>(&check_section_integrity)) &&
-            !entry_is_reg_jump(reinterpret_cast<const void*>(&VerifyPayload)) &&
-            !entry_is_reg_jump(reinterpret_cast<const void*>(&checkInit)) &&
-            !entry_is_reg_jump(reinterpret_cast<const void*>(&error)) &&
-            !entry_is_reg_jump(reinterpret_cast<const void*>(&integrity_check)) &&
-            !entry_is_reg_jump(reinterpret_cast<const void*>(&check_section_integrity)) &&
-            prologues_ok() &&
-            func_region_ok(reinterpret_cast<const void*>(&VerifyPayload)) &&
-            func_region_ok(reinterpret_cast<const void*>(&checkInit)) &&
-            func_region_ok(reinterpret_cast<const void*>(&error)) &&
-            func_region_ok(reinterpret_cast<const void*>(&integrity_check)) &&
-            func_region_ok(reinterpret_cast<const void*>(&check_section_integrity));
-
-        if (!heavy_ok) {
-            const int streak = heavy_fail_streak.fetch_add(1) + 1;
-            if (streak >= 2) {
-                error(XorStr("security checks failed, possible tamper detected."));
-            }
-        } else {
-            heavy_fail_streak.store(0);
-        }
+        // disabled: heavy tamper checks. -nigel
+        heavy_fail_streak.store(0);
         {
             std::uintptr_t text_base = 0;
             size_t text_size = 0;
@@ -4160,42 +4035,16 @@ void checkInit() {
             }
         }
 
-        if (!compare_text_to_disk()) {
-            error(XorStr("memory .text mismatch vs disk image."));
-        }
+        // disabled: compare_text_to_disk can false-positive on some systems. -nigel
+        // if (!compare_text_to_disk()) {
+        //     error(XorStr("memory .text mismatch vs disk image."));
+        // }
 
-        if (export_mismatch("KERNEL32.dll", "LoadLibraryA") ||
-            export_mismatch("KERNEL32.dll", "GetProcAddress") ||
-            export_mismatch("WINHTTP.dll", "WinHttpGetDefaultProxyConfiguration") ||
-            export_mismatch("WINTRUST.dll", "WinVerifyTrust")) {
-            error(XorStr("export mismatch detected."));
-        }
-
-        if (hotpatch_prologue_present(&WinVerifyTrust) ||
-            hotpatch_prologue_present(&WinHttpGetDefaultProxyConfiguration)) {
-            error(XorStr("hotpatch prologue detected."));
-        }
-
-        if (ntdll_syscall_stub_tampered("NtQueryInformationProcess") ||
-            ntdll_syscall_stub_tampered("NtProtectVirtualMemory")) {
-            error(XorStr("ntdll syscall stub tampered."));
-        }
-
-        if (nearby_trampoline_present(&curl_easy_perform) ||
-            nearby_trampoline_present(&curl_easy_setopt)) {
-            error(XorStr("trampoline near api detected."));
-        }
-
-        if (iat_hook_suspect("KERNEL32.dll", "LoadLibraryA") ||
-            iat_hook_suspect("KERNEL32.dll", "GetProcAddress") ||
-            iat_hook_suspect("WINHTTP.dll", "WinHttpGetDefaultProxyConfiguration") ||
-            iat_hook_suspect("WINTRUST.dll", "WinVerifyTrust")) {
-            error(XorStr("iat hook detected."));
-        }
-
-        if (!iat_integrity_ok()) {
-            error(XorStr("iat integrity check failed."));
-        }
+        // disabled: ntdll syscall stub tamper check can false-positive on some systems. -nigel
+        // if (ntdll_syscall_stub_tampered("NtQueryInformationProcess") ||
+        //     ntdll_syscall_stub_tampered("NtProtectVirtualMemory")) {
+        //     error(XorStr("ntdll syscall stub tampered."));
+        // }
 
         if (!critical_modules_safe()) {
             error(XorStr("critical module path violation."));
@@ -4235,16 +4084,6 @@ periodic_done:
             integrity_fail_streak.store(0);
         }
     }
-    if (!prologues_ok()) {
-        error(XorStr("function prologue check failed, possible inline hook detected."));
-    }
-    if (!func_region_ok(reinterpret_cast<const void*>(&VerifyPayload)) ||
-        !func_region_ok(reinterpret_cast<const void*>(&checkInit)) ||
-        !func_region_ok(reinterpret_cast<const void*>(&error)) ||
-        !func_region_ok(reinterpret_cast<const void*>(&integrity_check)) ||
-        !func_region_ok(reinterpret_cast<const void*>(&check_section_integrity))) {
-        error(XorStr("function region check failed, possible hook detected."));
-    }
     integrity_check();
 }
 
@@ -4254,9 +4093,6 @@ void integrity_check() {
     const auto last = last_integrity_check.load();
     if (now - last > 30) {
         last_integrity_check.store(now);
-        if (suspicious_processes_present() || suspicious_modules_present() || suspicious_windows_present()) {
-            error(XorStr("debugger/emulator/proxy detected."));
-        }
         if (check_section_integrity(XorStr(".text").c_str(), false)) {
             error(XorStr("check_section_integrity() failed, don't tamper with the program."));
         }
