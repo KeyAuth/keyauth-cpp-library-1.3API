@@ -26,6 +26,13 @@
 #include <cctype>
 
 namespace keyauth_detail {
+// HTTP names use ASCII casing regardless of the application's locale. -nigel
+inline char ascii_lower(unsigned char value) noexcept {
+    if (value >= 'A' && value <= 'Z') {
+        return static_cast<char>(value + ('a' - 'A'));
+    }
+    return static_cast<char>(value);
+}
 inline std::wstring bounded_http_query(const wchar_t* query, size_t bytes,
     const void* buffer, size_t buffer_size) {
     if (!bytes) return {};
@@ -64,7 +71,7 @@ inline bool consume_header(SignatureHeaders& out, std::string line) {
     if (colon == std::string::npos) return true;
     std::string key = line.substr(0, colon);
     std::transform(key.begin(), key.end(), key.begin(),
-        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        [](unsigned char c) { return keyauth_detail::ascii_lower(c); });
     std::string* target = nullptr;
     if (key == "x-signature-ed25519") target = &out.signature;
     if (key == "x-signature-timestamp") target = &out.timestamp;
@@ -143,6 +150,46 @@ inline PayloadResult verify_payload(const std::string& signature,
 #pragma comment(lib, "bcrypt.lib")
 
 namespace keyauth_detail {
+// Prefer UTF-8 paths while retaining existing Windows code-page callers. -nigel
+inline std::filesystem::path native_file_path(const std::string& value) {
+    if (value.empty() || value.find('\0') != std::string::npos || value.size() > INT_MAX) {
+        throw std::invalid_argument("Invalid API file path.");
+    }
+
+    const int length = static_cast<int>(value.size());
+    UINT code_page = CP_UTF8;
+    DWORD flags = MB_ERR_INVALID_CHARS;
+    int required = MultiByteToWideChar(code_page, flags, value.data(), length, nullptr, 0);
+    if (!required) {
+        if (GetLastError() != ERROR_NO_UNICODE_TRANSLATION) {
+            throw std::runtime_error("Cannot decode API file path.");
+        }
+        code_page = CP_ACP;
+        flags = 0;
+        required = MultiByteToWideChar(code_page, flags, value.data(), length, nullptr, 0);
+    }
+    if (!required) {
+        throw std::runtime_error("Cannot decode API file path.");
+    }
+
+    std::wstring decoded(static_cast<size_t>(required), L'\0');
+    if (MultiByteToWideChar(code_page, flags, value.data(), length, decoded.data(), required) != required) {
+        throw std::runtime_error("Cannot decode API file path.");
+    }
+    std::filesystem::path result(decoded);
+    if (code_page == CP_UTF8 && GetACP() != CP_UTF8) {
+        std::error_code error;
+        if (!std::filesystem::exists(result, error)) {
+            const std::filesystem::path legacy(value);
+            error.clear();
+            if (std::filesystem::exists(legacy, error)) {
+                return legacy;
+            }
+        }
+    }
+    return result;
+}
+
 // MD5 is retained solely for the API's existing executable/token hash fields.
 // Authentication is provided by TLS and Ed25519, not this compatibility digest.
 inline std::string file_md5(const std::filesystem::path& path) {

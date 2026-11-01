@@ -168,7 +168,7 @@ static bool normalize_signature_header(std::string sig_in, std::string& sig_hex_
 
     if (is_hex_string(sig_in) && sig_in.size() == 128) {
         std::transform(sig_in.begin(), sig_in.end(), sig_in.begin(),
-            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            [](unsigned char c) { return keyauth_detail::ascii_lower(c); });
         sig_hex_out = sig_in;
         return true;
     }
@@ -663,7 +663,7 @@ static std::string decode_pubkey_hex(const uint8_t* obf, size_t len, uint8_t key
 static std::string to_lower_ascii(std::string v)
 {
     std::transform(v.begin(), v.end(), v.begin(),
-        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        [](unsigned char c) { return keyauth_detail::ascii_lower(c); });
     return v;
 }
 
@@ -829,20 +829,26 @@ void KeyAuth::api::init()
         KA_EXIT(0);
     }
 
-    if (resolved_path != "" || !resolved_path.empty()) {
+    if (!resolved_path.empty()) {
 
-        if (!std::filesystem::exists(resolved_path)) {
+        const auto token_path = keyauth_detail::native_file_path(resolved_path);
+        if (!std::filesystem::exists(token_path)) {
             MessageBoxA(0, XorStr("File not found. Please make sure the file exists.").c_str(), NULL, MB_ICONERROR);
             KA_EXIT(0);
         }
         //get the contents of the file
-        std::ifstream file(resolved_path);
+        std::ifstream file(token_path);
+        if (!file) {
+            throw request_error("Cannot open API token file.");
+        }
         std::string token;
         std::string thash;
         ScopeWipe wipe_token(token);
-        std::getline(file, token);
+        if (!std::getline(file, token)) {
+            throw request_error("Cannot read API token file.");
+        }
 
-        thash = keyauth_detail::file_md5(std::filesystem::path(resolved_path));
+        thash = keyauth_detail::file_md5(token_path);
 
         data += XorStr("&token=").c_str() + curl_escape(nullptr, token);
         data += XorStr("&thash=").c_str() + curl_escape(nullptr, thash);
@@ -2237,11 +2243,11 @@ void KeyAuth::api::log(std::string message) {
     checkInit();
     ScopeWipe wipe_message(message);
 
-    char acUserName[UNLEN + 1]{};
-    DWORD nUserName = sizeof(acUserName);
+    wchar_t acUserName[UNLEN + 1]{};
+    DWORD nUserName = static_cast<DWORD>(std::size(acUserName));
     std::string UsernamePC;
-    if (GetUserNameA(acUserName, &nUserName) && nUserName > 0 && nUserName <= sizeof(acUserName))
-        UsernamePC.assign(acUserName, nUserName - 1);
+    if (GetUserNameW(acUserName, &nUserName) && nUserName > 0 && nUserName <= std::size(acUserName))
+        UsernamePC = wide_to_utf8(acUserName);
     SecureZeroMemory(acUserName, sizeof(acUserName));
     ScopeWipe wipe_pcuser(UsernamePC);
 
@@ -2746,7 +2752,7 @@ static bool is_https_url(const std::string& url)
     if (url.size() < prefix.size())
         return false;
     for (size_t i = 0; i < prefix.size(); ++i) {
-        const char c = static_cast<char>(std::tolower(static_cast<unsigned char>(url[i])));
+        const char c = keyauth_detail::ascii_lower(static_cast<unsigned char>(url[i]));
         if (c != prefix[i])
             return false;
     }
@@ -3668,9 +3674,9 @@ std::string KeyAuth::api::req(std::string data, const std::string& url) {
         std::string host_lower = host;
         std::string eff_lower = eff_host;
         std::transform(host_lower.begin(), host_lower.end(), host_lower.begin(),
-            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            [](unsigned char c) { return keyauth_detail::ascii_lower(c); });
         std::transform(eff_lower.begin(), eff_lower.end(), eff_lower.begin(),
-            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            [](unsigned char c) { return keyauth_detail::ascii_lower(c); });
         if (!eff_lower.empty() && eff_lower != host_lower) {
             curl_guard.reset();
             throw request_error(XorStr("effective url host mismatch."));
@@ -3701,15 +3707,11 @@ std::string checksum()
 }
 
 std::string getPath() {
-    const char* programDataPath = std::getenv("ALLUSERSPROFILE");
-
-    if (programDataPath != nullptr) {
-        return std::string(programDataPath);
+    const wchar_t* program_data = _wgetenv(L"ALLUSERSPROFILE");
+    if (program_data && *program_data) {
+        return wide_to_utf8(program_data);
     }
-    else {
-
-        return std::filesystem::current_path().string();
-    }
+    return std::filesystem::current_path().u8string();
 }
 
 void RedactField(nlohmann::json& jsonObject, const std::string& fieldName)
@@ -3780,36 +3782,18 @@ void KeyAuth::api::debugInfo(std::string data, std::string url, std::string resp
         redacted_data = datas.dump();
     }
 
-    //gets the path
-    std::string path = getPath();
-
-    //fetch filename
-
-    TCHAR filename[MAX_PATH];
-    GetModuleFileName(NULL, filename, MAX_PATH);
-
-    TCHAR* filename_only = PathFindFileName(filename);
-
-    std::wstring filenameOnlyString(filename_only);
-
-    std::string filenameOnly(filenameOnlyString.begin(), filenameOnlyString.end());
-
-    ///////////////////////
-
-    //creates variables for the paths needed :smile:
-    std::string KeyAuthPath = path + "\\KeyAuth";
-    std::string logPath = KeyAuthPath + "\\Debug\\" + filenameOnly.substr(0, filenameOnly.size() - 4);
-
-    //basically loops until we have all the paths
-    if (!std::filesystem::exists(KeyAuthPath) || !std::filesystem::exists(KeyAuthPath + "\\Debug") || !std::filesystem::exists(logPath)) {
-
-        if (!std::filesystem::exists(KeyAuthPath)) { std::filesystem::create_directory(KeyAuthPath); }
-
-        if (!std::filesystem::exists(KeyAuthPath + "\\Debug")) { std::filesystem::create_directory(KeyAuthPath + "\\Debug"); }
-
-        if (!std::filesystem::exists(logPath)) { std::filesystem::create_directory(logPath); }
-
+    // Keep debug paths in UTF-16; narrowing Unicode filenames loses characters. -nigel
+    std::wstring executable_path(32768, L'\0');
+    const DWORD path_length = GetModuleFileNameW(nullptr, executable_path.data(),
+        static_cast<DWORD>(executable_path.size()));
+    if (!path_length || path_length >= executable_path.size()) {
+        throw request_error("Cannot locate executable for debug log.");
     }
+    executable_path.resize(path_length);
+
+    const auto executable_name = std::filesystem::path(executable_path).filename().stem();
+    const auto log_path = keyauth_detail::native_file_path(getPath()) / L"KeyAuth" / L"Debug" / executable_name;
+    std::filesystem::create_directories(log_path);
 
     if (response.length() >= 500) { return; }
 
@@ -3821,7 +3805,7 @@ void KeyAuth::api::debugInfo(std::string data, std::string url, std::string resp
 
     std::strftime(time, sizeof(time), "%m-%d-%Y", localTime);
 
-    std::ofstream logfile(logPath + "\\" + time + ".txt", std::ios::app);
+    std::ofstream logfile(log_path / (std::string(time) + ".txt"), std::ios::app);
 
     //get time
     int hours = localTime->tm_hour;

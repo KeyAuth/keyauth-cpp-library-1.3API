@@ -59,9 +59,11 @@ jobs:
           #include "auth-test-access.hpp"
           #include <dpapi.h>
           #include <iostream>
+          #include <clocale>
           #include <type_traits>
           #include <cstdlib>
           extern std::string curl_escape(CURL*, const std::string&);
+          extern std::string checksum();
           extern std::string get_str_between_two_str(const std::string&, const std::string&, const std::string&);
           namespace KeyAuth {
           struct keyauth_test_access {
@@ -366,6 +368,18 @@ jobs:
               if (!condition) std::abort();
           }
           int run() {
+              const int previous_mode = _configthreadlocale(_ENABLE_PER_THREAD_LOCALE);
+              const std::string previous_locale = std::setlocale(LC_CTYPE, nullptr);
+              for (const char* locale : {"C", "tr-TR", "ja-JP", "zh-CN", "pt-BR"}) {
+                  if (!std::setlocale(LC_CTYPE, locale)) return 1;
+                  keyauth_detail::SignatureHeaders localized;
+                  keyauth_detail::consume_header(localized, "X-SIGNATURE-ED25519: valid\r\n");
+                  keyauth_detail::consume_header(localized, "X-SIGNATURE-TIMESTAMP: 1770000000\r\n");
+                  if (localized.signature != "valid" || localized.timestamp != "1770000000") return 1;
+                  if (keyauth_detail::ascii_lower('I') != 'i') return 1;
+              }
+              std::setlocale(LC_CTYPE, previous_locale.c_str());
+              _configthreadlocale(previous_mode);
               keyauth_detail::SignatureHeaders h;
               using keyauth_detail::consume_header;
               consume_header(h, "HTTP/1.1 200 Connection established\r\n");
@@ -459,6 +473,27 @@ jobs:
 
           namespace file_digest_test {
           int run() {
+              // Cover Unicode paths without requiring English language packs. -nigel
+              const auto directory = std::filesystem::temp_directory_path() /
+                  std::filesystem::path(L"keyauth-\u4e2d\u6587-\u65e5\u672c\u8a9e-a\u00e7\u00e3o");
+              std::filesystem::create_directories(directory);
+              const auto unicode_path = directory / L"\u30c6\u30b9\u30c8-\u00e7.bin";
+              { std::ofstream output(unicode_path, std::ios::binary); output << "abc"; }
+              const auto decoded_path = keyauth_detail::native_file_path(unicode_path.u8string());
+              const auto unicode_digest = keyauth_detail::file_md5(decoded_path);
+              std::filesystem::remove(unicode_path);
+              std::filesystem::remove(directory);
+              if (unicode_digest != "900150983cd24fb0d6963f7d28e17f72") return 1;
+              bool invalid_path_rejected = false;
+              try { keyauth_detail::native_file_path(std::string("a\0b", 3)); }
+              catch (const std::invalid_argument&) { invalid_path_rejected = true; }
+              if (!invalid_path_rejected) return 1;
+              std::wstring executable(32768, L'\0');
+              const DWORD length = GetModuleFileNameW(nullptr, executable.data(),
+                  static_cast<DWORD>(executable.size()));
+              if (!length || length >= executable.size()) return 1;
+              executable.resize(length);
+              if (checksum() != keyauth_detail::file_md5(std::filesystem::path(executable))) return 1;
               const auto path = std::filesystem::temp_directory_path() / "keyauth-checksum-test.bin";
               { std::ofstream out(path, std::ios::binary); out << "abc"; }
               const auto digest = keyauth_detail::file_md5(path);
